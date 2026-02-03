@@ -422,24 +422,26 @@ def _complete(
 
     # Generate labels
     y = f(c.detach().numpy())
-    y = torch.sigmoid(torch.FloatTensor(y))
-    y = (y >= 0.5) * 1.0
+    if n_tasks == 1:
+        y = torch.sigmoid(torch.FloatTensor(y)).squeeze(-1)
+        y = (y >= 0.5) * 1.0
+    else:
+        y = torch.argmax(torch.FloatTensor(y), dim=-1)
 
     u = c[:, :n_concepts]
     X = torch.FloatTensor(X)
     u = torch.FloatTensor(u)
     y = torch.FloatTensor(y)
 
-    uy = torch.cat([u, y], dim=-1)
-    uy_names = [f'C{i}' for i in range(n_concepts)] + [f'y{i}' for i in range(n_tasks)]
+    uy = torch.cat([u, y.unsqueeze(-1)], dim=-1)
+    uy_names = [f'C{i}' for i in range(n_concepts)] + ['y']
     graph_c_to_y = pd.DataFrame(
-        np.zeros((n_concepts + n_tasks, n_concepts + n_tasks)),
+        np.zeros((n_concepts + 1, n_concepts + 1)),
         index=uy_names,
         columns=uy_names,
     )
     for i in range(n_concepts):
-        for j in range(n_tasks):
-            graph_c_to_y.iloc[i, n_concepts + j] = 1  # concepts influence tasks
+        graph_c_to_y.iloc[i, n_concepts] = 1  # concepts influence tasks
 
     return X, uy, uy_names, graph_c_to_y
 
@@ -498,7 +500,7 @@ class CompletenessDataset(ConceptDataset):
         Directed acyclic graph representing concept-to-task relationships.
         All concepts influence all tasks in this dataset.
     concept_names : list of str
-        Names of all concepts and tasks. Format: ['C0', 'C1', ..., 'y0', 'y1', ...]
+        Names of all concepts and tasks. Format: ['C0', 'C1', ..., 'y']
     n_concepts : int
         Total number of observable concepts and tasks (includes both, excludes hidden).
     n_features : tuple or int
@@ -622,7 +624,7 @@ class CompletenessDataset(ConceptDataset):
         concept_metadata = {
             name: {'type': 'discrete'} for name in concept_names
         }
-        cardinalities = tuple([1] * len(concept_names))  # All binary concepts
+        cardinalities = tuple([1] * self._n_concepts) + tuple([self._n_tasks])
 
         annotations = Annotations({
             1: AxisAnnotation(

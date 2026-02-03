@@ -210,12 +210,16 @@ class BaseModel(nn.Module, ABC):
         self._backbone = backbone
 
         if latent_encoder is not None:
-            self._latent_encoder = latent_encoder(input_size,
-                                    **(latent_encoder_kwargs or {}))
+            self._latent_encoder = latent_encoder(
+                input_size,
+                **(latent_encoder_kwargs or {})
+            )
         elif latent_encoder_kwargs is not None:
             # assume an MLP encoder if latent_encoder_kwargs provided but no latent_encoder
-            self._latent_encoder = MLP(input_size=input_size,
-                                **latent_encoder_kwargs)
+            self._latent_encoder = MLP(
+                input_size=input_size,
+                **latent_encoder_kwargs
+            )
         else:
             self._latent_encoder = nn.Identity()
 

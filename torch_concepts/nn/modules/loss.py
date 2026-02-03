@@ -155,7 +155,8 @@ class WeightedConceptLoss(nn.Module):
     Args:
         annotations (Annotations): Annotations object with concept metadata.
         fn_collection (GroupConfig): Loss function configuration.
-        weight (float): Weight for concept loss; (1 - weight) is for task loss.
+        concept_weight (float): Weight for concept loss
+        task_weight (float): Weight for task loss
         task_names (List[str]): List of task concept names.
 
     Example:
@@ -174,11 +175,13 @@ class WeightedConceptLoss(nn.Module):
         self, 
         annotations: Annotations, 
         fn_collection: GroupConfig,
-        weight: float,
+        concept_weight: float,
+        task_weight: float,
         task_names: List[str]
     ):
         super().__init__()
-        self.weight = weight
+        self.concept_weight = concept_weight
+        self.task_weight = task_weight
         self.fn_collection = fn_collection
         annotations = annotations.get_axis_annotation(axis=1)
         concept_names = [name for name in annotations.labels if name not in task_names]
@@ -212,4 +215,4 @@ class WeightedConceptLoss(nn.Module):
         c_loss = self.concept_loss(concept_input, concept_target)
         t_loss = self.task_loss(task_input, task_target)
         
-        return c_loss * self.weight + t_loss * (1 - self.weight)
+        return c_loss * self.concept_weight + t_loss * self.task_weight

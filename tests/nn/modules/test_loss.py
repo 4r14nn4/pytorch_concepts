@@ -205,7 +205,8 @@ class TestWeightedConceptLoss(unittest.TestCase):
         loss_fn = WeightedConceptLoss(
             self.annotations, 
             loss_config, 
-            weight=0.5,
+            concept_weight=0.5,
+            task_weight=0.5,
             task_names=self.task_names
         )
         
@@ -220,7 +221,7 @@ class TestWeightedConceptLoss(unittest.TestCase):
         self.assertTrue(loss >= 0)
 
     def test_concept_only_weight(self):
-        """Test with weight=1.0 (only concept loss)."""
+        """Test with concept_weight=1.0, task_weight=0.0 (only concept loss)."""
         loss_config = GroupConfig(
             binary=nn.BCEWithLogitsLoss()
         )
@@ -228,7 +229,8 @@ class TestWeightedConceptLoss(unittest.TestCase):
         loss_fn = WeightedConceptLoss(
             self.annotations,
             loss_config,
-            weight=1.0,
+            concept_weight=1.0,
+            task_weight=0.0,
             task_names=self.task_names
         )
         
@@ -239,7 +241,7 @@ class TestWeightedConceptLoss(unittest.TestCase):
         self.assertTrue(loss >= 0)
 
     def test_task_only_weight(self):
-        """Test with weight=0.0 (only task loss)."""
+        """Test with concept_weight=0.0, task_weight=1.0 (only task loss)."""
         loss_config = GroupConfig(
             binary=nn.BCEWithLogitsLoss()
         )
@@ -247,7 +249,8 @@ class TestWeightedConceptLoss(unittest.TestCase):
         loss_fn = WeightedConceptLoss(
             self.annotations,
             loss_config,
-            weight=0.0,
+            concept_weight=0.0,
+            task_weight=1.0,
             task_names=self.task_names
         )
         
@@ -270,14 +273,16 @@ class TestWeightedConceptLoss(unittest.TestCase):
         loss_fn_high_concept = WeightedConceptLoss(
             self.annotations,
             loss_config,
-            weight=0.9,
+            concept_weight=0.9,
+            task_weight=0.1,
             task_names=self.task_names
         )
         
         loss_fn_high_task = WeightedConceptLoss(
             self.annotations,
             loss_config,
-            weight=0.1,
+            concept_weight=0.1,
+            task_weight=0.9,
             task_names=self.task_names
         )
         
@@ -297,7 +302,8 @@ class TestWeightedConceptLoss(unittest.TestCase):
         loss_fn = WeightedConceptLoss(
             self.annotations_mixed,
             loss_config,
-            weight=0.6,
+            concept_weight=0.6,
+            task_weight=0.4,
             task_names=self.task_names_mixed
         )
         
@@ -326,7 +332,8 @@ class TestWeightedConceptLoss(unittest.TestCase):
         loss_fn = WeightedConceptLoss(
             self.annotations,
             loss_config,
-            weight=0.5,
+            concept_weight=0.5,
+            task_weight=0.5,
             task_names=self.task_names
         )
         
@@ -348,16 +355,18 @@ class TestWeightedConceptLoss(unittest.TestCase):
         endogenous = torch.randn(10, 5)
         targets = torch.randint(0, 2, (10, 5)).float()
         
-        for weight in [0.0, 0.25, 0.5, 0.75, 1.0]:
+        for concept_weight in [0.0, 0.25, 0.5, 0.75, 1.0]:
+            task_weight = 1.0 - concept_weight
             loss_fn = WeightedConceptLoss(
                 self.annotations,
                 loss_config,
-                weight=weight,
+                concept_weight=concept_weight,
+                task_weight=task_weight,
                 task_names=self.task_names
             )
             
             loss = loss_fn(endogenous, targets)
-            self.assertTrue(loss >= 0, f"Loss should be non-negative for weight={weight}")
+            self.assertTrue(loss >= 0, f"Loss should be non-negative for concept_weight={concept_weight}")
 
 
 class TestLossConfiguration(unittest.TestCase):

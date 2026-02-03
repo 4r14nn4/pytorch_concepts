@@ -43,12 +43,13 @@ from .modules.loss import ConceptLoss, WeightedConceptLoss
 from .modules.metrics import ConceptMetrics
 
 # Models (high-level)
-from .modules.high.models.blackbox import BlackBox
-from .modules.high.models.cbm import ConceptBottleneckModel, \
-    ConceptBottleneckModel_Joint
+from .modules.high.models.blackbox import BlackBox, BlackBoxTaskOnly
+from .modules.high.models.cbm import ConceptBottleneckModel, ConceptBottleneckModel_Joint
+from .modules.high.models.cem import ConceptEmbeddingModel, ConceptEmbeddingModel_Joint
 
 # Learners (high-level)
 from .modules.high.learners.joint import JointLearner
+# from .modules.high.learners.independent import IndependentLearner
 
 # Models (mid-level)
 from .modules.mid.models.cpd import ParametricCPD
@@ -124,13 +125,16 @@ __all__ = [
 
     # Models (high-level)
     "BlackBox",
-    # "BlackBox_torch",
+    "BlackBoxTaskOnly",
     "ConceptBottleneckModel",
     "ConceptBottleneckModel_Joint",
     "ConceptBottleneckModel_Independent",
+    "ConceptEmbeddingModel",
+    "ConceptEmbeddingModel_Joint",
 
     # Learners (high-level)
     "JointLearner",
+    #"IndependentLearner",
 
     # Models (mid-level)
     "ParametricCPD",
