@@ -1,0 +1,9 @@
+defaults:
+  - _commons
+  - _self_
+  
+_target_: "torch_concepts.nn.BlackBoxTaskOnly"
+
+task_names: ${dataset.default_task_names}
+
+inference: null

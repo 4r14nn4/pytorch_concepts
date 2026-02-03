@@ -6,14 +6,11 @@ hydra:
   job:
     name: test
   sweeper:
-    # standard grid search
     params:
       seed: 42
-      dataset: asia  # asia / sachs / insurance
-      model: cbm  # cbm / cem
-      loss: weighted
-      loss.concept_weight: 8
-      loss.task_weight: 1
+      dataset: insurance
+      model: blackbox
+      loss: standard
 
 dataset:
   batch_size: 4096
@@ -25,12 +22,11 @@ model:
     hidden_size: 128
     n_layers: 3
     activation: leaky_relu
-    dropout: 0.
-  # exogenous_size: 4  # for embedding models
+    dropout: 0.1
 
 metrics:
-  summary_metrics: true
-  perconcept_metrics: true # true or ${dataset.default_task_names}
+  summary_metrics: false
+  perconcept_metrics: true #${dataset.default_task_names}
 
 trainer:
   # logger: wandb
@@ -39,4 +35,4 @@ trainer:
 
 matmul_precision: medium
 
-notes: test
+notes: test_blackbox

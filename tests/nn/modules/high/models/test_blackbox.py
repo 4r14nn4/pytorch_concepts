@@ -4,6 +4,7 @@ Comprehensive tests for BlackBox model in torch_concepts.nn.modules.high.models.
 import pytest
 import torch
 import torch.nn as nn
+from torch.distributions import Bernoulli
 from torch_concepts.nn.modules.high.models.blackbox import BlackBox
 from torch_concepts.annotations import AxisAnnotation, Annotations
 
@@ -23,7 +24,10 @@ class DummyLatentEncoder(nn.Module):
 
 def test_blackbox_init():
     ann = Annotations({
-        1: AxisAnnotation(labels=['output'])
+        1: AxisAnnotation(
+            labels=['output'],
+            metadata={'output': {'type': 'discrete', 'distribution': Bernoulli}}
+        )
     })
     model = BlackBox(
         input_size=8,
@@ -39,7 +43,10 @@ def test_blackbox_init():
 
 def test_blackbox_forward_shape():
     ann = Annotations({
-        1: AxisAnnotation(labels=['output'])
+        1: AxisAnnotation(
+            labels=['output'],
+            metadata={'output': {'type': 'discrete', 'distribution': Bernoulli}}
+        )
     })
     model = BlackBox(
         input_size=8,
@@ -50,11 +57,15 @@ def test_blackbox_forward_shape():
     )
     x = torch.randn(2, 8)
     out = model(x)
-    assert out.shape == (2, 4)
+    # Output size is sum of cardinalities (1 for binary)
+    assert out.shape == (2, 1)
 
 def test_blackbox_filter_output_for_loss_and_metric():
     ann = Annotations({
-        1: AxisAnnotation(labels=['output'])
+        1: AxisAnnotation(
+            labels=['output'],
+            metadata={'output': {'type': 'discrete', 'distribution': Bernoulli}}
+        )
     })
     model = BlackBox(
         input_size=8,
@@ -77,7 +88,10 @@ def test_blackbox_filter_output_for_loss_and_metric():
 
 def test_blackbox_repr():
     ann = Annotations({
-        1: AxisAnnotation(labels=['output'])
+        1: AxisAnnotation(
+            labels=['output'],
+            metadata={'output': {'type': 'discrete', 'distribution': Bernoulli}}
+        )
     })
     model = BlackBox(
         input_size=8,
