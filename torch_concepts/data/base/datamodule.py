@@ -222,11 +222,11 @@ class ConceptDataModule(LightningDataModule):
                 self.dataset.input_data = embs
                 self.embs_precomputed = True
                 if verbose:
-                    logger.info(f"✓ Using embeddings. New input shape: {tuple(self.dataset.input_data.shape)}")
+                    logger.info(f"Embeddings have been precomputed using backbone: {self.backbone.__class__.__name__}. \
+                                New input shape: {tuple(self.dataset.input_data.shape)}")
             else:
                 self.embs_precomputed = False
-                if verbose:
-                    logger.warning("Warning: precompute_embs=True but no backbone provided. Using raw input data.")
+                raise ValueError("precompute_embs=True but no backbone model provided.")
         else:
             # Use raw input data without preprocessing
             self.embs_precomputed = False

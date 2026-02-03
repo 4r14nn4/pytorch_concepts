@@ -43,9 +43,8 @@ from .modules.loss import ConceptLoss, WeightedConceptLoss
 from .modules.metrics import ConceptMetrics
 
 # Models (high-level)
-from .modules.high.models.blackbox import BlackBox
-from .modules.high.models.cbm import ConceptBottleneckModel, \
-    ConceptBottleneckModel_Joint #, ConceptBottleneckModel_Independent
+from .modules.high.models.blackbox import BlackBox, BlackBoxTaskOnly
+from .modules.high.models.cbm import ConceptBottleneckModel, ConceptBottleneckModel_Joint
 from .modules.high.models.cem import ConceptEmbeddingModel, ConceptEmbeddingModel_Joint
 
 # Learners (high-level)
@@ -126,7 +125,7 @@ __all__ = [
 
     # Models (high-level)
     "BlackBox",
-    # "BlackBox_torch",
+    "BlackBoxTaskOnly",
     "ConceptBottleneckModel",
     "ConceptBottleneckModel_Joint",
     "ConceptBottleneckModel_Independent",

@@ -18,7 +18,7 @@ dependencies:
   - hydra-core
   - wandb
   - numpy
-  - pandas
+  - pandas==2.2.*
   - pytables
   - tqdm
   - scikit-learn
@@ -27,6 +27,5 @@ dependencies:
 
   - pip
   - pip:
-    - pytorch-concepts
     - bnlearn
     - hydra-list-sweeper
