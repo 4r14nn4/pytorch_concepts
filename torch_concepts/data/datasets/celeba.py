@@ -269,7 +269,7 @@ class CelebADataset(ConceptDataset):
     @property
     def n_samples(self) -> int:
         """Number of samples in the dataset."""
-        return 202599
+        return len(self.input_data)
 
     @property
     def n_features(self) -> tuple:
@@ -277,10 +277,10 @@ class CelebADataset(ConceptDataset):
         
         CelebA images are 218x178x3 (H x W x C) reordered to (C, H, W).
         """
-        return (3, 218, 178)
+        return tuple(self[0]['inputs']['x'].shape)
 
     @property
     def shape(self) -> tuple:
         """Shape of the input tensor (n_samples, C, H, W)."""
-        return (self.n_samples, 3, 218, 178)
+        return (self.n_samples, *self.n_features)
     

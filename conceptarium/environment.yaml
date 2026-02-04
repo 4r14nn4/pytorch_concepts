@@ -27,4 +27,5 @@ dependencies:
   - pip
   - pip:
     - bnlearn # library for Bayesian networks
+    - transformers # State-of-the-art pretrained models for backbones
     - hydra-list-sweeper
