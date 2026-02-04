@@ -173,7 +173,8 @@ class ConceptDataModule(LightningDataModule):
     @property
     def bkb_embs_filename(self) -> str:
         """Filename for precomputed embeddings based on backbone name."""
-        return f"bkb_embs_{self.backbone.__class__.__name__}.pt" if self.backbone is not None else None
+        # convert '/' to '-' in backbone name for filename safety
+        return f"bkb_embs_{self.backbone.replace('/', '-')}.pt" if self.backbone is not None else None
 
     def _add_set(self, split_type, _set):
         """
@@ -222,7 +223,7 @@ class ConceptDataModule(LightningDataModule):
                 self.dataset.input_data = embs
                 self.embs_precomputed = True
                 if verbose:
-                    logger.info(f"Embeddings have been precomputed using backbone: {self.backbone.__class__.__name__}. \
+                    logger.info(f"Embeddings have been precomputed using backbone: {self.backbone}. \
                                 New input shape: {tuple(self.dataset.input_data.shape)}")
             else:
                 self.embs_precomputed = False
@@ -243,6 +244,16 @@ class ConceptDataModule(LightningDataModule):
         Args:
             precompute_embs: Whether to precompute embeddings using backbone.
             verbose: Whether to print detailed logging information.
+
+        Note:
+            When precompute_embs=True:
+                - If cached embeddings exist, they will be loaded automatically
+                - If not, embeddings will be computed and saved to cache
+                - Cache location: dataset.root_dir/embeddings_{backbone_name}.pt
+            
+            When precompute_embs=False:
+                - Uses the original input_data without any backbone preprocessing
+                - Backbone is ignored even if provided
         """
         # ----------------------------------
         # Preprocess data with backbone if needed

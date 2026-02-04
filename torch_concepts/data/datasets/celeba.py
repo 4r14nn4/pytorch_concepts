@@ -76,9 +76,8 @@ class CelebADataset(ConceptDataset):
     @property
     def raw_filenames(self) -> List[str]:
         """List of raw filenames that must be present to skip downloading."""
-        # Check for the extracted images folder and annotation files
         return [
-            "celeba/img_align_celeba",  # folder with images
+            "celeba/img_align_celeba.zip",
             "celeba/list_attr_celeba.txt",
             "celeba/list_eval_partition.txt",
         ]
@@ -93,38 +92,31 @@ class CelebADataset(ConceptDataset):
             "split_mapping.h5",
         ]
 
-    def _check_integrity(self) -> bool:
-        """Check if dataset files are present and valid (torchvision style)."""
-        for _, md5, filename in CELEBA_FILE_LIST:
-            fpath = os.path.join(self.root, "celeba", filename)
-            _, ext = os.path.splitext(filename)
-            # Allow original archive to be deleted (zip and 7z)
-            # Only need the extracted images
-            if ext not in [".zip", ".7z"] and not check_integrity(fpath, md5):
-                return False
-
-        # Should check a hash of the images
-        return os.path.isdir(os.path.join(self.root, "celeba", "img_align_celeba"))
-  
     def download(self):
-        """Download CelebA dataset from Google Drive (torchvision style).
+        """Download CelebA images zip and annotation files from Google Drive.
         
-        Downloads the aligned and cropped face images and annotation files
-        from Google Drive using the same method as torchvision.CelebA.
+        Downloads the aligned and cropped face images archive and annotation files.
+        Extraction is handled separately by the extract() method.
         
         Note: Requires gdown package for Google Drive downloads.
         """
-        if self._check_integrity():
-            logger.info("Files already downloaded and verified")
-            return
-
         celeba_folder = os.path.join(self.root, "celeba")
         os.makedirs(celeba_folder, exist_ok=True)
 
-        logger.info(f"Downloading CelebA dataset from Google Drive to {celeba_folder}...")
+        # Files to download: zip file and annotation files
+        files_to_download = [
+            CELEBA_FILE_LIST[0],  # img_align_celeba.zip
+            CELEBA_FILE_LIST[1],  # list_attr_celeba.txt
+            CELEBA_FILE_LIST[5],  # list_eval_partition.txt
+        ]
         
-        for file_id, md5, filename in CELEBA_FILE_LIST:
-            logger.info(f"Downloading {filename}...")
+        for file_id, md5, filename in files_to_download:
+            file_path = os.path.join(celeba_folder, filename)
+            if os.path.exists(file_path):
+                logger.info(f"{filename} already present, skipping download")
+                continue
+                
+            logger.info(f"Downloading {filename} from Google Drive to {celeba_folder}...")
             download_file_from_google_drive(
                 file_id, 
                 celeba_folder, 
@@ -132,11 +124,31 @@ class CelebADataset(ConceptDataset):
                 md5
             )
         
-        # Extract the images archive
-        logger.info("Extracting img_align_celeba.zip...")
-        extract_archive(os.path.join(celeba_folder, "img_align_celeba.zip"))
+        logger.info(f"CelebA files downloaded to {celeba_folder}.")
+
+    def maybe_extract(self):
+        """Extract the CelebA images archive.
         
-        logger.info(f"CelebA dataset downloaded and extracted to {celeba_folder}.")
+        Extracts img_align_celeba.zip to the celeba folder.
+        """
+        celeba_folder = os.path.join(self.root, "celeba")
+        archive_path = os.path.join(celeba_folder, "img_align_celeba.zip")
+        
+        if os.path.isdir(os.path.join(celeba_folder, "img_align_celeba")):
+            logger.info("Images already extracted")
+            return
+            
+        if not os.path.exists(archive_path):
+            logger.warning(f"Archive not found: {archive_path}")
+            return
+            
+        logger.info("Extracting img_align_celeba.zip...")
+        extract_archive(archive_path)
+        logger.info(f"CelebA images extracted to {celeba_folder}.")
+
+    def maybe_download(self):
+        """Download and extract the dataset if needed."""
+        super().maybe_download()
 
     def _load_csv(self, filename: str, header: Optional[int] = None):
         """Load a CSV file in CelebA format (torchvision style).
@@ -172,6 +184,8 @@ class CelebADataset(ConceptDataset):
         will be loaded on-the-fly in __getitem__.
         """
         self.maybe_download()
+
+        self.maybe_extract()
 
         celeba_folder = os.path.join(self.root, "celeba")
         logger.info(f"Building CelebA dataset from raw files in {celeba_folder}...")
