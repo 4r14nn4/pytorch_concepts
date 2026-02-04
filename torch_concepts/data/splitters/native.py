@@ -14,11 +14,11 @@ from ..utils import resolve_size
 from ..base.dataset import ConceptDataset
 from ..base.splitter import Splitter
 
-class StandardSplitter(Splitter):
-    """Standard splitting strategy for datasets.
+class NativeSplitter(Splitter):
+    """Native splitting strategy for datasets.
     
     Divides a dataset into train, validation, and test splits based on
-    standard splits provided by the dataset authors.
+    native splits provided by the dataset authors.
     Ensures reproducibility when numpy's random seed is set externally
     before calling fit().
     
@@ -37,7 +37,7 @@ class StandardSplitter(Splitter):
             
     Example:
         >>> # 70% train, 10% val, 20% test
-        >>> splitter = StandardSplitter(val_size=0.1, test_size=0.2)
+        >>> splitter = NativeSplitter(val_size=0.1, test_size=0.2)
         >>> splitter.fit(dataset)
         >>> print(f"Train: {splitter.train_len}, Val: {splitter.val_len}, Test: {splitter.test_len}")
         Train: 700, Val: 100, Test: 200
@@ -46,7 +46,7 @@ class StandardSplitter(Splitter):
     def __init__(
         self
     ):
-        """Initialize the StandardSplitter.
+        """Initialize the NativeSplitter.
         
         Args:
             val_size: Size of validation set. If float, represents fraction
@@ -59,16 +59,16 @@ class StandardSplitter(Splitter):
         super().__init__()
 
     def fit(self, dataset: ConceptDataset) -> None:
-        """Split the dataset into train/val/test sets based on standard splits.
+        """Split the dataset into train/val/test sets based on native splits.
         
         Args:
             dataset: The ConceptDataset to split.
             
         Raises:
-            ValueError: If the dataset does not provide standard splits.
+            ValueError: If the dataset does not provide native splits.
         """
 
-        # Load standard splits from dataset if available
+        # Load native splits from dataset if available
         if any("split_mapping" in path for path in dataset.processed_paths):
             split_series = pd.read_hdf(
                 next(path for path in dataset.processed_paths if "split_mapping" in path), key="split_mapping"
@@ -86,12 +86,12 @@ class StandardSplitter(Splitter):
 
             self._fitted = True
 
-            logger.info(f"Attention StandardSplitter uses predefined splits provided by the dataset authors."
+            logger.info(f"Attention NativeSplitter uses predefined splits provided by the dataset authors."
                         f"Train size: {self.train_len}, "
                         f"Val size: {self.val_len}, "
                         f"Test size: {self.test_len}")
         else:
-            raise ValueError("Dataset does not provide standard splits.")
+            raise ValueError("Dataset does not provide native splits.")
 
 
     def __repr__(self) -> str:

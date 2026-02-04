@@ -27,5 +27,5 @@ dependencies:
 
   - pip
   - pip:
-    - bnlearn
+    - bnlearn # library for Bayesian networks
     - hydra-list-sweeper

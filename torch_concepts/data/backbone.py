@@ -47,21 +47,36 @@ def compute_backbone_embs(
         torch.Size([10000, 512])
     """
     
-    # Set device with auto-detection if None
+    # Set device with auto-detection if None (priority: CUDA > MPS > CPU)
     if device is None:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if torch.cuda.is_available():
+            device = 'cuda'
+        # elif torch.backends.mps.is_available():
+            # device = 'mps' # NOT SUPPORTED
+        else:
+            device = 'cpu'
     device = torch.device(device)
     
-    backbone_model = get_model(backbone, weights="DEFAULT").to(device).eval() # "DEFAULT" points to best available weights
-    weights = get_model_weights(backbone, weights="DEFAULT")
-    preprocess = weights.transforms()
+    if isinstance(backbone, str):
+        # Get weights enum and access DEFAULT to get actual weights instance
+        weights = get_model_weights(backbone).DEFAULT
+        backbone_model = get_model(backbone, weights=weights).to(device).eval()
+        preprocess = weights.transforms()
+    else:
+        raise ValueError("Backbone must be a string model name \
+            supported by torchvision.models. Custom backbones will \
+            be supported soon.")
     
-    # Create dataloader
+    # Custom collate function to extract 'x' from nested dict structure
+    def collate_fn(batch):
+        return torch.stack([sample['inputs']['x'] for sample in batch])
+    
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=False,  # Important: maintain order
+        shuffle=False,
         num_workers=workers,
+        collate_fn=collate_fn
     )
     
     embeddings_list = []
@@ -71,11 +86,12 @@ def compute_backbone_embs(
     with torch.no_grad():
         iterator = tqdm(dataloader, desc="Extracting embeddings") if verbose else dataloader
         for batch in iterator:
-            x = batch['inputs']['x'].to(device)
-            embeddings = backbone_model(preprocess(x)) # Forward pass through backbone
-            embeddings_list.append(embeddings.cpu()) # Move back to CPU and store
+            batch = batch.to(device)
+            batch = preprocess(batch)  # Apply preprocessing transforms
+            embedding = backbone_model(batch)  # Forward pass through backbone
+            embeddings_list.append(embedding.cpu())  # Move back to CPU and store
 
-    all_embeddings = torch.cat(embeddings_list, dim=0) # Concatenate all embeddings
+    all_embeddings = torch.cat(embeddings_list, dim=0)  # Concatenate all embeddings
     
     return all_embeddings
 

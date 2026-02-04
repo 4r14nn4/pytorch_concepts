@@ -1,12 +1,13 @@
 import os
+import csv
 import torch
 import pandas as pd
 import numpy as np
 import logging
 from typing import List, Optional, Union
 from tqdm import tqdm
-from datasets import load_dataset
 from torchvision.transforms import Compose
+from torchvision.datasets.utils import download_file_from_google_drive, extract_archive, check_integrity
 from torch_concepts import Annotations, AxisAnnotation
 from torch_concepts.data.base import ConceptDataset
 import torchvision.transforms as T
@@ -15,6 +16,18 @@ import numpy as np
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+
+# CelebA file list from torchvision - Google Drive file IDs, MD5 hashes, and filenames
+CELEBA_FILE_LIST = [
+    # File ID, MD5 Hash, Filename
+    ("0B7EVK8r0v71pZjFTYXZWM3FlRnM", "00d2c5bc6d35e252742224ab0c1e8fcb", "img_align_celeba.zip"),
+    ("0B7EVK8r0v71pblRyaVFSWGxPY0U", "75e246fa4810816ffd6ee81facbd244c", "list_attr_celeba.txt"),
+    ("1_ee_0u7vcNLOfNLegJRHmolfH5ICW-XS", "32bd1bd63d3c78cd57e08160ec5ed1e2", "identity_CelebA.txt"),
+    ("0B7EVK8r0v71pbThiMVRxWXZ4dU0", "00566efa6fedff7a56946cd1c10f1c16", "list_bbox_celeba.txt"),
+    ("0B7EVK8r0v71pd0FJY3Blby1HUTQ", "cc24ecafdb5b50baae59b03474781f8c", "list_landmarks_align_celeba.txt"),
+    ("0B7EVK8r0v71pY0NSMzRuSXJEVkk", "d32c9cbf5e040fd4025c592c306e6668", "list_eval_partition.txt"),
+]
 
 class CelebADataset(ConceptDataset):
     """Dataset class for CelebA.
@@ -35,43 +48,25 @@ class CelebADataset(ConceptDataset):
     
     def __init__(
         self,
-        name: str,
-        root: str,
-        transform: Union[Compose, torch.nn.Module] = None,
-        task_label: Optional[List[str]] = None,
-        class_attributes: Optional[List[str]] = None,  # Alias for task_label
+        root: str = None, # root directory to store/load the dataset
         concept_subset: Optional[list] = None,
         label_descriptions: Optional[dict] = None,
     ):
-        self.name = name
-        self.transform = transform
 
         # If root is not provided, create a local folder automatically
         if root is None:
-            root = os.path.join(os.getcwd(), 'data', self.name)
+            root = os.path.join(os.getcwd(), 'data', "celeba")
 
         self.root = root
-
-        # Support both task_label and class_attributes (class_attributes takes precedence)
-        if class_attributes is not None:
-            self.task_label = class_attributes if isinstance(class_attributes, list) else [class_attributes]
-        elif task_label is not None:
-            self.task_label = task_label if isinstance(task_label, list) else [task_label]
-        else:
-            self.task_label = ['Attractive']
             
         self.label_descriptions = label_descriptions
         
-        # These will be set during build/load
-        self.concept_attr_names = []
-        self.task_attr_names = []
-        
         # Load data and annotations
-        input_data, concepts, annotations, graph = self.load()
+        filenames, concepts, annotations, graph = self.load()
         
         # Initialize parent class
         super().__init__(
-            input_data=input_data,
+            input_data=filenames,
             concepts=concepts,
             annotations=annotations,
             graph=graph,
@@ -81,138 +76,157 @@ class CelebADataset(ConceptDataset):
     @property
     def raw_filenames(self) -> List[str]:
         """List of raw filenames that must be present to skip downloading."""
-        # find the directory of downloaded data (if any)
-        path_base_file = os.path.join(self.root, "flwrlabs___celeba", "*", "*", "*", "dataset_info.json")
-        matches = glob(path_base_file)
-        if len(matches)==0:
-            return ["__nonexistent_file__"]
-        d = os.path.dirname(matches[0])
-        
-        # eliminate self.root (it is added by default later).
-        d = d.replace(self.root +"/", "")
-        base_file = matches[0].replace(self.root +"/", "")
-
-        n_train_files = 19
-        n_valid_files = 3
-        n_test_files = 3
-
-        train_files = []
-        valid_files = []
-        test_files = []
- 
-        for i in range(n_train_files):
-            if i<10:        
-                train_files.append(os.path.join(d, f"celeba-train-0000{i}-of-000{n_train_files}.arrow"))
-            else:
-                train_files.append(os.path.join(d, f"celeba-train-000{i}-of-000{n_train_files}.arrow"))
-        for i in range(n_valid_files):
-            valid_files.append(os.path.join(d, f"celeba-valid-0000{i}-of-0000{n_valid_files}.arrow"))
-        for i in range(n_test_files):
-            test_files.append(os.path.join(d, f"celeba-test-0000{i}-of-0000{n_test_files}.arrow"))
-
-        return [base_file] + train_files + valid_files + test_files
-
+        # Check for the extracted images folder and annotation files
+        return [
+            "celeba/img_align_celeba",  # folder with images
+            "celeba/list_attr_celeba.txt",
+            "celeba/list_eval_partition.txt",
+        ]
 
     @property
     def processed_filenames(self) -> List[str]:
         """List of processed filenames that will be created during build step."""
         return [
-            f"images.pt",
-            f"concepts.h5",
+            "filenames.txt",
+            "concepts.h5",
             "annotations.pt",
-           f"split_mapping.h5",
+            "split_mapping.h5",
         ]
+
+    def _check_integrity(self) -> bool:
+        """Check if dataset files are present and valid (torchvision style)."""
+        for _, md5, filename in CELEBA_FILE_LIST:
+            fpath = os.path.join(self.root, "celeba", filename)
+            _, ext = os.path.splitext(filename)
+            # Allow original archive to be deleted (zip and 7z)
+            # Only need the extracted images
+            if ext not in [".zip", ".7z"] and not check_integrity(fpath, md5):
+                return False
+
+        # Should check a hash of the images
+        return os.path.isdir(os.path.join(self.root, "celeba", "img_align_celeba"))
   
     def download(self):
-        """Download raw data files from HuggingFace and save to root directory."""
-        logger.info(f"Downloading CelebA dataset from HuggingFace...")
-        load_dataset(
-                "flwrlabs/celeba", 
-                cache_dir=self.root
+        """Download CelebA dataset from Google Drive (torchvision style).
+        
+        Downloads the aligned and cropped face images and annotation files
+        from Google Drive using the same method as torchvision.CelebA.
+        
+        Note: Requires gdown package for Google Drive downloads.
+        """
+        if self._check_integrity():
+            logger.info("Files already downloaded and verified")
+            return
+
+        celeba_folder = os.path.join(self.root, "celeba")
+        os.makedirs(celeba_folder, exist_ok=True)
+
+        logger.info(f"Downloading CelebA dataset from Google Drive to {celeba_folder}...")
+        
+        for file_id, md5, filename in CELEBA_FILE_LIST:
+            logger.info(f"Downloading {filename}...")
+            download_file_from_google_drive(
+                file_id, 
+                celeba_folder, 
+                filename, 
+                md5
             )
-        logger.info(f"CelebA dataset downloaded and saved to {self.root}.")
+        
+        # Extract the images archive
+        logger.info("Extracting img_align_celeba.zip...")
+        extract_archive(os.path.join(celeba_folder, "img_align_celeba.zip"))
+        
+        logger.info(f"CelebA dataset downloaded and extracted to {celeba_folder}.")
+
+    def _load_csv(self, filename: str, header: Optional[int] = None):
+        """Load a CSV file in CelebA format (torchvision style).
+        
+        Args:
+            filename: Name of the CSV file to load.
+            header: Row index containing headers, or None if no headers.
+            
+        Returns:
+            Tuple of (headers, indices, data) where data is a torch tensor.
+        """
+        filepath = os.path.join(self.root, "celeba", filename)
+        with open(filepath) as csv_file:
+            data = list(csv.reader(csv_file, delimiter=" ", skipinitialspace=True))
+
+        if header is not None:
+            headers = [h for h in data[header] if h]  # Filter out empty strings
+            data = data[header + 1:]
+        else:
+            headers = []
+
+        indices = [row[0] for row in data]
+        data = [row[1:] for row in data]
+        # Filter out empty strings from data rows as well
+        data_int = [list(map(int, [x for x in row if x])) for row in data]
+
+        return headers, indices, torch.tensor(data_int)
 
     def build(self):
-        """Build processed dataset from all splits (train, valid, test) concatenated."""
+        """Build processed dataset: save concepts, annotations and splits metadata.
+        
+        Images are not saved as they are already in the downloaded folder and
+        will be loaded on-the-fly in __getitem__.
+        """
         self.maybe_download()
 
-        # --- Load data ---
-        logger.info(f"Building CelebA dataset from raw files in {self.root_dir}...")
-        ds = load_dataset(path=self.root)
+        celeba_folder = os.path.join(self.root, "celeba")
+        logger.info(f"Building CelebA dataset from raw files in {celeba_folder}...")
 
-        # --- Construct input_data, concepts, annotations --- 
-        # construct concept_names
-        concept_names = list(ds['train'].features.keys())
-        concept_names.remove('image')
-        concept_names.remove('celeb_id')
-
-        # process each split
-        split_indices = []
-        all_images = []
-        all_concepts_df = pd.DataFrame()
-        for split_name in ['train','validation', 'test']:
-            split_dataset = ds[split_name]
-            corrupted_images = []
-            # extract images
-            for idx in tqdm(range(len(split_dataset)), desc=f"  {split_name} images", unit="img"):
-                try:
-                    img = split_dataset[idx]['image']
-                    arr = np.array(img)
-                    all_images.append(torch.from_numpy(arr))
-                except OSError as e:
-                    logger.warning(f"Skipping image at index {idx} in split {split_name} due to error: {e}")
-                    corrupted_images.append(idx)
-          
-            if len(corrupted_images)!=0:
-                logger.warning(f"Skipping {len(corrupted_images)} corrupted images in split {split_name}.")
-                #remove corrupted indices from split_dataset
-                split_dataset = split_dataset.select([i for i in range(len(split_dataset)) if i not in corrupted_images])
-            
-            # extract split_indices
-            split_indices.extend([split_name] * len(split_dataset))
-            
-            # extract concepts for this split
-            split_concepts = split_dataset.to_pandas()[concept_names]
-            all_concepts_df = pd.concat([all_concepts_df, split_concepts], ignore_index=True)
-
+        # Load annotation files (torchvision style)
+        _, filenames, splits_data = self._load_csv("list_eval_partition.txt")
+        attr_names, _, attr_data = self._load_csv("list_attr_celeba.txt", header=1)
         
-        assert all_concepts_df.columns.tolist() == concept_names, "Concept names do not match."
-
-
-        # combine all data
-        input_data = torch.stack(all_images)
-        logger.info(f"Input data shape: {input_data.shape}")
-        concepts = all_concepts_df.astype(int)
-        logger.info(f"Concepts shape: {concepts.shape}")
+        # Map from {-1, 1} to {0, 1} (same as torchvision)
+        attr_data = torch.div(attr_data + 1, 2, rounding_mode="floor")
+        
+        # Create split labels
+        split_map = {0: 'train', 1: 'valid', 2: 'test'}
+        split_labels = [split_map[splits_data[idx].item()] for idx in range(len(filenames))]
+        
+        # Convert concepts to DataFrame
+        concepts_df = pd.DataFrame(attr_data.numpy(), columns=attr_names)
     
-        # create annotations
-        cardinalities = tuple([2] * len(concept_names))
+        # Create annotations
+        cardinalities = tuple([1] * len(attr_names))
         annotations = Annotations({
             1: AxisAnnotation(
-                labels=concept_names,
+                labels=attr_names,
                 cardinalities=cardinalities,
-                metadata={name: {'type': 'discrete'} for name in concept_names}
+                metadata={name: {'type': 'discrete'} for name in attr_names}
             )
         })
 
         # --- Save processed data ---
-        logger.info(f"Saving concepts, annotations and split mapping to {self.root}")
-        torch.save(input_data, self.processed_paths[0])
-        concepts.to_hdf(self.processed_paths[1], key="concepts", mode="w")
+        logger.info(f"Saving filenames, concepts, annotations and split mapping to {self.root_dir}")
+        os.makedirs(self.root_dir, exist_ok=True)
+        
+        # Save filenames list
+        with open(self.processed_paths[0], 'w') as f:
+            f.write('\n'.join(filenames))
+        
+        concepts_df.to_hdf(self.processed_paths[1], key="concepts", mode="w")
         torch.save(annotations, self.processed_paths[2])
-        pd.Series(split_indices).to_hdf(self.processed_paths[4], key="split_mapping", mode="w")
+        pd.Series(split_labels).to_hdf(self.processed_paths[3], key="split_mapping", mode="w")
 
     def load_raw(self):
         """Load raw processed files for the current split."""
         self.maybe_build()  # Ensures build() is called if needed
         
         logger.info(f"Loading dataset from {self.root_dir}")
-        input_data = torch.load(self.processed_paths[0])
+        
+        # Load filenames list
+        with open(self.processed_paths[0], 'r') as f:
+            filenames = f.read().strip().split('\n')
+        
         concepts = pd.read_hdf(self.processed_paths[1], "concepts")
         annotations = torch.load(self.processed_paths[2])
         graph = None
         
-        return input_data, concepts, annotations, graph
+        return filenames, concepts, annotations, graph
 
     def load(self):
         """Load and optionally preprocess dataset."""
@@ -233,21 +247,40 @@ class CelebADataset(ConceptDataset):
         Returns:
             dict: Dictionary containing 'inputs' and 'concepts' sub-dictionaries.
         """
-        # Get raw input data and concepts
-        x = self.input_data[item]
-        x = x.permute(2,0,1).float() / 255.0 
+        # Load image on-the-fly
+        filename = self.input_data[item]  # input_data contains filenames
+        img_path = os.path.join(self.root, "celeba", "img_align_celeba", filename)
+        img = Image.open(img_path)
+        x = torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
+        
         c = self.concepts[item]
-
-        # TODO: handle missing values with masks
 
         # Create sample dictionary
         sample = {
-            'inputs': {'x': x},    # input data: multiple inputs can be stored in a dict
-            'concepts': {'c': c},  # concepts: multiple concepts can be stored in a dict
-            # TODO: add scalers when these are set
-            # also check if batch transforms work correctly inside the model training loop
-            # 'transforms': {'x': self.scalers.get('input', None),
-            #               'c': self.scalers.get('concepts', None)}
+            'inputs': {'x': x},
+            'concepts': {'c': c},
         }
 
         return sample
+
+    # Override properties that assume input_data is a tensor
+    # In CelebA, input_data is a list of filenames (images loaded on-the-fly)
+    
+    @property
+    def n_samples(self) -> int:
+        """Number of samples in the dataset."""
+        return 202599
+
+    @property
+    def n_features(self) -> tuple:
+        """Shape of features in dataset's input (excluding number of samples).
+        
+        CelebA images are 218x178x3 (H x W x C) reordered to (C, H, W).
+        """
+        return (3, 218, 178)
+
+    @property
+    def shape(self) -> tuple:
+        """Shape of the input tensor (n_samples, C, H, W)."""
+        return (self.n_samples, 3, 218, 178)
+    

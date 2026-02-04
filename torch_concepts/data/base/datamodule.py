@@ -205,7 +205,7 @@ class ConceptDataModule(LightningDataModule):
 
     def maybe_use_backbone_embs(self, precompute_embs: bool = False, backbone_device: Optional[str] = None, verbose: bool = True):
         if verbose:
-            logger.info(f"Input shape: {tuple(self.dataset.input_data.shape)}")
+            logger.info(f"Input shape: {tuple(self.dataset[0]['inputs']['x'].shape)}")
         if precompute_embs:
             if self.backbone is not None:
                 # Precompute embeddings with automatic caching
