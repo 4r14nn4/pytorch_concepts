@@ -73,9 +73,12 @@ class NativeSplitter(Splitter):
             split_series = pd.read_hdf(
                 next(path for path in dataset.processed_paths if "split_mapping" in path), key="split_mapping"
             )
-            train_idxs = split_series[split_series == "train"].index.tolist()
-            val_idxs = split_series[split_series == "valid"].index.tolist()
-            test_idxs = split_series[split_series == "test"].index.tolist()
+            
+            # Normalize split labels to handle variations like "valid", "validation", "val", etc.
+            split_lower = split_series.str.lower()
+            train_idxs = split_series[split_lower.str.startswith("train")].index.tolist()
+            val_idxs = split_series[split_lower.str.startswith("val")].index.tolist()
+            test_idxs = split_series[split_lower.str.startswith("test")].index.tolist()
             
             # Store indices
             self.set_indices(
