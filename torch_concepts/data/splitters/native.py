@@ -74,7 +74,7 @@ class NativeSplitter(Splitter):
                 next(path for path in dataset.processed_paths if "split_mapping" in path), key="split_mapping"
             )
             train_idxs = split_series[split_series == "train"].index.tolist()
-            val_idxs = split_series[split_series == "val"].index.tolist()
+            val_idxs = split_series[split_series == "valid"].index.tolist()
             test_idxs = split_series[split_series == "test"].index.tolist()
             
             # Store indices
@@ -86,7 +86,7 @@ class NativeSplitter(Splitter):
 
             self._fitted = True
 
-            logger.info(f"Attention NativeSplitter uses predefined splits provided by the dataset authors."
+            logger.info(f"NativeSplitter uses predefined splits native to the dataset."
                         f"Train size: {self.train_len}, "
                         f"Val size: {self.val_len}, "
                         f"Test size: {self.test_len}")
