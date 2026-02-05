@@ -77,9 +77,9 @@ class CelebADataset(ConceptDataset):
     def raw_filenames(self) -> List[str]:
         """List of raw filenames that must be present to skip downloading."""
         return [
-            "celeba/img_align_celeba.zip",
-            "celeba/list_attr_celeba.txt",
-            "celeba/list_eval_partition.txt",
+            "raw/img_align_celeba.zip",
+            "raw/list_attr_celeba.txt",
+            "raw/list_eval_partition.txt",
         ]
 
     @property
@@ -100,7 +100,7 @@ class CelebADataset(ConceptDataset):
         
         Note: Requires gdown package for Google Drive downloads.
         """
-        celeba_folder = os.path.join(self.root, "celeba")
+        celeba_folder = os.path.join(self.root, "raw")
         os.makedirs(celeba_folder, exist_ok=True)
 
         # Files to download: zip file and annotation files
@@ -129,9 +129,9 @@ class CelebADataset(ConceptDataset):
     def maybe_extract(self):
         """Extract the CelebA images archive.
         
-        Extracts img_align_celeba.zip to the celeba folder.
+        Extracts img_align_celeba.zip to the raw celeba folder.
         """
-        celeba_folder = os.path.join(self.root, "celeba")
+        celeba_folder = os.path.join(self.root, "raw")
         archive_path = os.path.join(celeba_folder, "img_align_celeba.zip")
         
         if os.path.isdir(os.path.join(celeba_folder, "img_align_celeba")):
@@ -144,7 +144,7 @@ class CelebADataset(ConceptDataset):
             
         logger.info("Extracting img_align_celeba.zip...")
         extract_archive(archive_path)
-        logger.info(f"CelebA images extracted to {celeba_folder}.")
+        logger.info(f"CelebA images extracted to {celeba_folder}")
 
     def maybe_download(self):
         """Download and extract the dataset if needed."""
@@ -160,7 +160,7 @@ class CelebADataset(ConceptDataset):
         Returns:
             Tuple of (headers, indices, data) where data is a torch tensor.
         """
-        filepath = os.path.join(self.root, "celeba", filename)
+        filepath = os.path.join(self.root, "raw", filename)
         with open(filepath) as csv_file:
             data = list(csv.reader(csv_file, delimiter=" ", skipinitialspace=True))
 
@@ -187,7 +187,7 @@ class CelebADataset(ConceptDataset):
 
         self.maybe_extract()
 
-        celeba_folder = os.path.join(self.root, "celeba")
+        celeba_folder = os.path.join(self.root, "raw")
         logger.info(f"Building CelebA dataset from raw files in {celeba_folder}...")
 
         # Load annotation files (torchvision style)
@@ -266,7 +266,7 @@ class CelebADataset(ConceptDataset):
             x = self.input_data[item]  # input_data contains precomputed embeddings
         else:
             filename = self.input_data[item]  # input_data contains filenames
-            img_path = os.path.join(self.root, "celeba", "img_align_celeba", filename)
+            img_path = os.path.join(self.root, "raw", "img_align_celeba", filename)
             img = Image.open(img_path)
             x = torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
         
