@@ -262,10 +262,13 @@ class CelebADataset(ConceptDataset):
             dict: Dictionary containing 'inputs' and 'concepts' sub-dictionaries.
         """
         # Load image on-the-fly
-        filename = self.input_data[item]  # input_data contains filenames
-        img_path = os.path.join(self.root, "celeba", "img_align_celeba", filename)
-        img = Image.open(img_path)
-        x = torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
+        if self.embs_precomputed:
+            x = self.input_data[item]  # input_data contains precomputed embeddings
+        else:
+            filename = self.input_data[item]  # input_data contains filenames
+            img_path = os.path.join(self.root, "celeba", "img_align_celeba", filename)
+            img = Image.open(img_path)
+            x = torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
         
         c = self.concepts[item]
 
