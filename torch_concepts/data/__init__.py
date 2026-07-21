@@ -1,14 +1,87 @@
-from .celeba import CelebADataset
-from .mnist import ColorMNISTDataset
-from .toy import ToyDataset, CompletenessDataset
-from .traffic import TrafficLights
-# from .cebab import CEBaBDataset
+"""
+Data module for concept-based datasets.
+
+This module provides dataset classes and utilities for working with concept-annotated
+data, including various benchmark datasets (MNIST, CelebA, CUB, etc.) and custom
+concept datasets.
+"""
+
+# Submodules
+from . import base
+from . import datasets
+from . import datamodules
+from . import preprocessing
+from . import scalers
+from . import splitters
+
+# Utilities
+from . import utils
+
+# IO utilities
+from . import io
+
+# Re-export datasets for convenient access
+from .datasets.bnlearn import BnLearnDataset
+from .datasets.toy import ToyDataset, CompletenessDataset
+from .datasets.categorical_toy_dag import ToyDAGDataset
+from .datasets.celeba import CelebADataset
+from .datasets.pendulum import PendulumDataset
+from .datasets.mnist_arithmetic import MNISTArithmeticDataset
+from .datasets.dsprites_regression import DSpritesRegressionDataset
+from .datasets.awa2 import AWA2Dataset
+from .datasets.cub import CUBDataset
+from .datasets.cebab import CEBaBDataset
+from .datasets.derm7pt import Derm7ptDataset
+
+# Re-export datamodules for convenient access
+from .datamodules.bnlearn import BnLearnDataModule
+from .datamodules.categorical_toy_dag import ToyDAGDataModule
+from .datamodules.completeness import CompletenessDataModule
+from .datamodules.celeba import CelebADataModule
+from .datamodules.pendulum import PendulumDataModule
+from .datamodules.mnist_arithmetic import MNISTArithmeticDataModule
+from .datamodules.dsprites_regression import DSpritesRegressionDataModule
+from .datamodules.awa2 import AWA2DataModule
+from .datamodules.cub import CUBDataModule
+from .datamodules.cebab import CEBaBDataModule
+from .datamodules.derm7pt import Derm7ptDataModule
 
 __all__ = [
-    "TrafficLights",
+    # Submodules
+    "base",
+    "datasets",
+    "datamodules",
+    "preprocessing",
+    "scalers",
+    "splitters",
+
+    "utils",
+    "io",
+
+    # Datasets
+    "BnLearnDataset",
     "ToyDataset",
     "CompletenessDataset",
-    "ColorMNISTDataset",
+    "ToyDAGDataset",
     "CelebADataset",
-  #  "CEBaBDataset"
+    "PendulumDataset",
+    "MNISTArithmeticDataset",
+    "DSpritesRegressionDataset",
+    "AWA2Dataset",
+    "CUBDataset",
+    "ChexpertDataset",
+    "CEBaBDataset",
+
+    # DataModules
+    "BnLearnDataModule",
+    "ToyDAGDataModule",
+    "CompletenessDataModule",
+    "CelebADataModule",
+    "PendulumDataModule",
+    "MNISTArithmeticDataModule",
+    "DSpritesRegressionDataModule",
+    "AWA2DataModule",
+    "CUBDataModule",
+    "ChexpertDataModule",
+    "CEBaBDataModule",
 ]

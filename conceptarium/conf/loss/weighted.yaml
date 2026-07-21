@@ -1,0 +1,15 @@
+# =============================================================
+# Loss settings
+# =============================================================
+_target_: "torch_concepts.nn.WeightedConceptLoss"
+
+concept_weight: 3 # weight applied to concepts
+task_weight: 1 # weight applied to tasks
+task_names: ${dataset.default_task_names}
+
+binary: 
+  _target_: "torch.nn.BCEWithLogitsLoss"
+categorical: 
+  _target_: "torch.nn.CrossEntropyLoss"
+continuous:
+  _target_: "torch.nn.MSELoss"

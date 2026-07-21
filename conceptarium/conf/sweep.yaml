@@ -1,0 +1,54 @@
+defaults:
+  - _default
+  - _self_
+
+hydra:
+  job:
+    name: test
+  sweeper:
+    params:
+      dataset: dag_asia, dag_sachs, dag_insurance, celeba
+      model: cbm, cem, c2bm
+
+seed: 42   # run, model init and training seed
+
+dataset:
+  datamodule:
+    seed: 0   # train/val/test split seed
+    batch_size: 2048
+
+# precompute and cache backbone embeddings
+precompute_embeddings: True
+force_precompute: False # Recompute even if a cache file exists.
+
+model:
+  model_cls:
+    train_inference: 
+      _target_: "torch_concepts.nn.DeterministicInference"
+      p_int: 0.8
+    # embedding_size: 8
+    optim_kwargs:
+      lr: 0.01
+  
+  latent_encoder: 
+    _target_: torch_concepts.nn.MLP
+    hidden_size: 128
+    n_layers: 1
+    activation: leaky_relu
+    dropout: 0.
+
+metrics:
+  summary: true
+  per_concept: true # true or ${dataset.default_task_names}
+
+trainer:
+  max_epochs: 10
+  patience: 20
+  logger: null # null / wandb
+  log_model: false  # whether to save checkpoint on wandb
+
+matmul_precision: medium
+
+debug: true # whether to add run to the analysis registry 
+
+notes: test

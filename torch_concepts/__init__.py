@@ -1,12 +1,20 @@
+"""
+torch_concepts: A PyTorch library for concept-based machine learning.
+
+This package provides tools and modules for building concept-based neural networks.
+"""
 from ._version import __version__
 from importlib import import_module
 from typing import Any
 
-from .concepts.annotations import Annotations, AxisAnnotation
-from .concepts.tensor import AnnotatedTensor, AnnotatedAdjacencyMatrix
-from .concepts.concept import ConceptTensor
-from . import nn
-from . import data
+from .annotations import Annotations
+from .tensor import AnnotatedTensor
+from .nn.modules.utils import GroupConfig
+from .concept_graph import ConceptGraph
+from .nn.modules.mid.variable import Variable, ConceptVariable, EmbeddingVariable
+from .utils import seed_everything
+from .backbone import Backbone, ImageBackbone, TextBackbone
+from . import nn, distributions
 
 def __getattr__(name: str) -> Any:
     if name in {"data", "nn"}:
@@ -17,13 +25,27 @@ def __getattr__(name: str) -> Any:
 __all__ = [
     "__version__",
 
+    # Data properties
     "Annotations",
-    "AxisAnnotation",
     "AnnotatedTensor",
-    "AnnotatedAdjacencyMatrix",
+    "ConceptGraph",
 
-    "ConceptTensor",
+    # Configuration
+    "GroupConfig",
+
+    # Feature extraction
+    "Backbone",
+    "ImageBackbone",
+    "TextBackbone",
+
+    # Variables
+    "Variable",
+    "ConceptVariable",
+    "EmbeddingVariable",
+
+    "seed_everything",
 
     "nn",
     "data",
+    "distributions",
 ]

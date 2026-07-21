@@ -1,0 +1,12 @@
+datamodule:
+  batch_size: 512
+
+  seed: ${seed}              # train/val/test split seed
+
+  val_size: 0.1
+  test_size: 0.2
+
+  max_samples: null # if null, use all samples
+  concept_subset: null # if null, use all concepts
+
+backbone: null

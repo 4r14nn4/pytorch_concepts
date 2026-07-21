@@ -1,7 +1,110 @@
+"""
+Utility functions for the torch_concepts package.
+
+This module provides various utility functions for working with concept-based models,
+including concept name validation, output size computation, explanation analysis,
+seeding for reproducibility, and numerical stability checks.
+"""
+import importlib
+import os
 from collections import Counter
-from typing import Dict, Union, List
+from typing import Any, Dict, Union, List, Optional
 import torch, math
 import logging
+from pytorch_lightning import seed_everything as pl_seed_everything
+
+
+def ensure_list(value: Any) -> List:
+    """
+    Ensure a value is converted to a list. If the value is iterable (but not a
+    string or dict), converts it to a list. Otherwise, wraps it in a list.
+
+    Args:
+        value: Any value to convert to list.
+
+    Returns:
+        List: The value as a list.
+
+    Examples:
+        >>> ensure_list([1, 2, 3])
+        [1, 2, 3]
+        >>> ensure_list((1, 2, 3))
+        [1, 2, 3]
+        >>> ensure_list(5)
+        [5]
+        >>> ensure_list("hello")
+        ['hello']
+    """
+    if isinstance(value, dict):
+        raise TypeError(
+            "Cannot convert dict to list. Use list(dict.values()) or "
+            "list(dict.keys()) explicitly to make your intent clear."
+        )
+    if hasattr(value, '__iter__') and not isinstance(value, str):
+        return list(value)
+    return [value]
+
+
+def resolve_hf_token() -> Optional[str]:
+    """Resolve an HF token from env vars or conceptarium.env fallback.
+
+    Priority order:
+    1. HF_TOKEN
+    2. HUGGINGFACE_HUB_TOKEN
+    3. HUGGINGFACEHUB_TOKEN
+    4. conceptarium.env.HUGGINGFACEHUB_TOKEN (if importable)
+    """
+    token = (
+        os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+        or os.environ.get("HUGGINGFACEHUB_TOKEN")
+    )
+    if token:
+        return token
+
+    try:
+        from conceptarium.env import HUGGINGFACEHUB_TOKEN as config_token
+    except Exception:
+        config_token = None
+
+    if config_token:
+        os.environ.setdefault("HF_TOKEN", config_token)
+        os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", config_token)
+        return config_token
+
+    return None
+
+
+def seed_everything(seed: int, workers: bool = True) -> int:
+    """Set random seeds across all libraries for reproducibility.
+    
+    Enhanced wrapper around PyTorch Lightning's seed_everything that also sets
+    PYTHONHASHSEED environment variable for complete reproducibility, including
+    Python's hash randomization.
+    
+    Sets seeds for:
+    - Python's random module
+    - NumPy's random module  
+    - PyTorch (CPU and CUDA)
+    - PYTHONHASHSEED environment variable
+    - PL_GLOBAL_SEED environment variable (via Lightning)
+    
+    Args:
+        seed: Random seed value to set across all libraries.
+        workers: If True, sets worker seed for DataLoaders.
+        
+    Returns:
+        The seed value that was set.
+        
+    Example:
+        >>> import torch_concepts as tc
+        >>> tc.seed_everything(42)
+        42
+        >>> # All random operations are now reproducible
+    """
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    return pl_seed_everything(seed, workers=workers)
+
 
 def validate_and_generate_concept_names(
     concept_names: Dict[int, Union[int, List[str]]],
@@ -90,6 +193,19 @@ def get_most_common_expl(
 
 
 def compute_temperature(epoch, num_epochs):
+    """
+    Compute temperature for annealing schedules.
+
+    Computes a temperature value that exponentially decreases from an initial
+    temperature of 1.0 to a final temperature of 0.5 over the course of training.
+
+    Args:
+        epoch (int): Current training epoch.
+        num_epochs (int): Total number of training epochs.
+
+    Returns:
+        torch.Tensor: The computed temperature value for the current epoch.
+    """
     final_temp = torch.tensor([0.5])
     init_temp = torch.tensor([1.0])
     rate = (math.log(final_temp) - math.log(init_temp)) / float(num_epochs)
@@ -120,11 +236,7 @@ def numerical_stability_check(cov, device, epsilon=1e-6):
             # Attempt Cholesky decomposition; if it fails, the matrix is not positive definite
             torch.linalg.cholesky(cov)
             if num_added > 0.0001:
-                logging.warning(
-                    "Added {} to the diagonal of the covariance matrix.".format(
-                        num_added
-                    )
-                )
+                logging.warning(f"Added {num_added} to the diagonal of the covariance matrix.")
             break
         except RuntimeError:
             # Add epsilon to the diagonal
@@ -135,3 +247,108 @@ def numerical_stability_check(cov, device, epsilon=1e-6):
             num_added += epsilon
             epsilon *= 2
     return cov
+
+
+def _is_int_index(x) -> bool:
+    """
+    Check if a value is an integer index.
+
+    Args:
+        x: Value to check.
+
+    Returns:
+        bool: True if x is an int or 0-dimensional tensor, False otherwise.
+    """
+    return isinstance(x, int) or (isinstance(x, torch.Tensor) and x.dim() == 0)
+
+
+def _check_tensors(tensors):
+    """
+    Validate that a list of tensors are compatible for concatenation.
+
+    Ensures all tensors have:
+    - At least 2 dimensions (batch and concept dimensions)
+    - Same batch size (dimension 0)
+    - Same trailing dimensions (dimension 2+)
+    - Same dtype and device
+    - Same requires_grad setting
+
+    The concept dimension (dimension 1) is allowed to vary.
+
+    Args:
+        tensors (List[torch.Tensor]): List of tensors to validate.
+
+    Raises:
+        ValueError: If tensors have incompatible shapes, dtypes, devices, or settings.
+    """
+    # First, check that all tensors have at least 2 dimensions
+    for i, t in enumerate(tensors):
+        if t.dim() < 2:
+            raise ValueError(f"Tensor {i} must have at least 2 dims (B, c_i, ...); got {tuple(t.shape)}.")
+
+    # Check that all tensors have the same number of dimensions
+    first_ndim = tensors[0].dim()
+    for i, t in enumerate(tensors):
+        if t.dim() != first_ndim:
+            raise ValueError(f"All tensors must have at least 2 dims and the same total number of dimensions; Tensor 0 has {first_ndim} dims, but Tensor {i} has {t.dim()} dims.")
+
+    B = tensors[0].shape[0]
+    dtype = tensors[0].dtype
+    device = tensors[0].device
+    rest_shape = tensors[0].shape[2:]  # dims >=2 must match
+
+    for i, t in enumerate(tensors):
+        if t.shape[0] != B:
+            raise ValueError(f"All tensors must share batch dim. Got {t.shape[0]} != {B} at field {i}.")
+        # only dim=1 may vary; dims >=2 must match exactly
+        if t.shape[2:] != rest_shape:
+            raise ValueError(
+                f"All tensors must share trailing shape from dim=2. "
+                f"Field {i} has {t.shape[2:]} != {rest_shape}."
+            )
+        if t.dtype != dtype:
+            raise ValueError("All tensors must share dtype.")
+        if t.device != device:
+            raise ValueError("All tensors must be on the same device.")
+        if t.requires_grad != tensors[0].requires_grad:
+            raise ValueError("All tensors must have the same requires_grad setting.")
+
+
+def get_from_string(class_path: str):
+    """Import and return a class from its fully qualified string path.
+
+    Args:
+        class_path: Fully qualified class path (e.g., 'torch.optim.Adam').
+
+    Returns:
+        Class object (not instantiated).
+
+    Example:
+        >>> Adam = get_from_string('torch.optim.Adam')
+        >>> Adam.__name__
+        'Adam'
+    """
+    module_path, class_name = class_path.rsplit('.', 1)
+    module = importlib.import_module(module_path)
+    cls = getattr(module, class_name)
+    return cls
+
+
+def instantiate_from_string(class_path: str, **kwargs):
+    """Instantiate a class from its fully qualified string path.
+    
+    Args:
+        class_path: Fully qualified class path (e.g., 'torch.nn.ReLU').
+        **kwargs: Keyword arguments passed to class constructor.
+        
+    Returns:
+        Instantiated class object.
+        
+    Example:
+        >>> relu = instantiate_from_string('torch.nn.ReLU')
+        >>> loss = instantiate_from_string(
+        ...     'torch.nn.BCEWithLogitsLoss', reduction='mean'
+        ... )
+    """
+    cls = get_from_string(class_path)
+    return cls(**kwargs)

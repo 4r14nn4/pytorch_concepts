@@ -1,0 +1,63 @@
+defaults:
+  - _self_
+
+model_cls:
+  # =============================================================
+  # Inference configs
+  # =============================================================
+  inference: 
+    _target_: "torch_concepts.nn.DeterministicInference"
+    _partial_: true
+
+  train_inference: ${model.model_cls.inference}
+
+  # =============================================================
+  # Concept distribution configs
+  # =============================================================
+  variable_distributions:
+    binary:
+      _target_: hydra.utils.get_class
+      path: torch.distributions.RelaxedBernoulli
+    categorical:
+      _target_: hydra.utils.get_class
+      path: torch.distributions.RelaxedOneHotCategorical
+    continuous:
+      _target_: hydra.utils.get_class
+      path: torch.distributions.Normal
+
+  variable_dist_kwargs:
+    binary:
+      temperature: 0.5
+    categorical:
+      temperature: 0.5
+    continuous: null
+
+  # =============================================================
+  # Lightning settings
+  # =============================================================
+  lightning: true
+
+  optim_class:
+    _target_: "hydra.utils.get_class"
+    path: "torch.optim.AdamW"
+  optim_kwargs:
+    lr: 0.00075
+
+  scheduler_class: 
+    _target_: "hydra.utils.get_class"
+    path: "torch.optim.lr_scheduler.ReduceLROnPlateau"
+  scheduler_kwargs:
+    factor: 0.1
+    min_lr: 1e-6
+    patience: 10
+    monitor: "val_loss"
+
+  
+# Latent encoder (features -> latent space); consumed by attach_latent_encoder,
+# `null` disables it.
+latent_encoder:
+  _target_: torch_concepts.nn.MLP
+  hidden_size: 64
+  n_layers: 1
+  activation: leaky_relu
+  dropout: 0.

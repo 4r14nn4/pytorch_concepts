@@ -1,0 +1,18 @@
+defaults:
+  - _commons
+  - _self_
+  
+name: completeness
+
+datamodule:
+  _target_: torch_concepts.data.datamodules.completeness.CompletenessDataModule
+
+  generation_seed: ${dataset.datamodule.seed}    # dataset generation seed
+
+  n_concepts: 50  # number of concepts
+  n_hidden_concepts: 10  # number of hidden concepts
+  n_tasks: 5  # number of tasks
+
+  n_gen: 10000
+
+default_task_names: [y]

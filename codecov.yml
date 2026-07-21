@@ -1,0 +1,42 @@
+codecov:
+  require_ci_to_pass: yes
+
+coverage:
+  precision: 2
+  round: down
+  range: "70...100"
+
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        if_ci_failed: error
+
+    patch:
+      default:
+        target: 80%
+        threshold: 5%
+
+comment:
+  layout: "reach,diff,flags,files,footer"
+  behavior: default
+  require_changes: no
+
+ignore:
+  - "tests/"
+  - "examples/"
+  - "doc/"
+  - "conceptarium/"
+  - "setup.py"
+  - "**/__pycache__"
+  - "**/*.pyc"
+  # Steerling integration depends on the optional `steerling` package and
+  # large Hub checkpoints; exclude it from coverage.
+  - "torch_concepts/steerling/"
+  - "**/steerling/**"
+  # Data loaders depend on fetching & storing external datasets (and pretrained
+  # backbones); exclude the whole data subpackage from coverage.
+  - "torch_concepts/data/"
+  - "**/data/**"
+

@@ -1,0 +1,22 @@
+defaults:
+  - _commons
+  - _self_
+
+name: celeba
+
+datamodule:
+  _target_: torch_concepts.data.datamodules.celeba.CelebADataModule
+
+  # as default, we use the native splitter provided by the dataset 
+  splitter: 
+    _target_: torch_concepts.data.splitters.native.NativeSplitter
+
+  # all CelebA attributes are binary facial features
+  label_descriptions: null
+
+default_task_names: [Attractive]
+
+backbone:
+  _target_: torch_concepts.backbone.ImageBackbone
+  name: resnet50
+  freeze: True

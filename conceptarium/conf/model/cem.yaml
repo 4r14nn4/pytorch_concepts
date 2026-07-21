@@ -1,0 +1,8 @@
+defaults:
+  - _commons
+  - _self_
+
+model_cls:
+  _target_: "torch_concepts.nn.ConceptEmbeddingModel"
+  task_names: ${dataset.default_task_names}
+  embedding_size: 8

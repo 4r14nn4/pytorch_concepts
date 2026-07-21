@@ -1,5 +1,10 @@
 scikit-learn
+scipy
 torch
-opencv-python
 pytorch-minimize
-torch_geometric
+pgmpy
+pandas
+pytorch-lightning
+networkx
+sympy
+sympytorch
