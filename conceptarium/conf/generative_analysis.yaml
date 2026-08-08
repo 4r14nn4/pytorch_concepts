@@ -2,9 +2,9 @@
 # Post-hoc analysis of a trained generative concept model.
 #
 #   cd conceptarium
-#   python run_generative_analysis.py                 # newest cbgm run
+#   python run_generative_analysis.py                 # EVERY cbgm run found
+#   python run_generative_analysis.py all_jobs=false  # only the newest
 #   python run_generative_analysis.py job_dir=outputs/multirun/.../0
-#   python run_generative_analysis.py all_jobs=true   # every matching run
 #
 # Produces, next to each job directory:
 #   overview.png            original / reconstruction / generation
@@ -24,18 +24,33 @@ hydra:
     dir: "outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}_${hydra.job.name}"
 
 # Explicit Hydra job directory to analyse -- a single path, or a list of them.
-# When null, the registry rows matching `filters` are used. Note the registry
-# deliberately omits `notes`, so filter on config keys instead.
+# When null, `search_dirs` is scanned instead.
 job_dir: null
-csv_path: runs.csv
+
+# Where to look for finished runs. Scanned recursively for job directories: a
+# directory holding both `.hydra/config.yaml` and `checkpoints/*.ckpt`. Relative
+# entries resolve against the directory you launched from.
+#
+# Deliberately NOT runs.csv. The registry stores absolute paths from whichever
+# machine did the training and is not written at all under `debug: true`, so
+# runs copied in from a GPU box -- the normal way results arrive -- are invisible
+# to it while sitting in plain sight on disk. Both defaults below are listed
+# because experiments launched from `conceptarium/` land in `conceptarium/
+# outputs/`, while results copied to the repo root land in `outputs/`.
+search_dirs:
+  - outputs
+  - ../outputs
+
+# Applied to each run's own saved config, by dotted key. `status` is gone: a run
+# counts as finished when it has a checkpoint, which is both the truth and the
+# only thing that makes it analysable.
 filters:
-  status: success
   model.model_cls._target_: torch_concepts.nn.ConceptBottleneckGenerativeModel
 
-# false: analyse only the newest matching run. true: analyse every one of them,
-# writing a figure set per model -- what comparing a sweep needs. Ignored when
+# true (default): analyse every matching run, writing a figure set into each job
+# folder -- what comparing a sweep needs. false: only the newest. Ignored when
 # `job_dir` is given explicitly.
-all_jobs: false
+all_jobs: true
 
 seed: 42
 

@@ -22,12 +22,19 @@ things a concept bottleneck generative model is *for*:
 ``generative_metrics.csv``
     Per-concept test accuracy and the reconstruction NLL.
 
-By default this runs on the newest matching run. Set ``all_jobs=true`` to
-produce the same three artefacts for **every** run in the registry that matches
-``filters`` — one set of figures per model, which is what comparing a sweep
-needs — plus a ``generative_metrics_all.csv`` collecting them into one table. A
-run whose checkpoint will not load (an architecture change since it was trained,
-usually) is reported and skipped rather than aborting the rest.
+By default this produces those three artefacts for **every** matching run it can
+find — one figure set per model, written into that model's own job folder, which
+is what comparing a sweep needs — plus a ``generative_metrics_all.csv``
+collecting them into one table. ``all_jobs=false`` narrows it to the newest.
+
+Runs are discovered by scanning ``search_dirs`` for directories holding both
+``.hydra/config.yaml`` and a checkpoint, and filtering on each run's own saved
+config. Notably *not* via ``runs.csv``: the registry records absolute paths from
+the machine that trained the run and is skipped entirely under ``debug: true``,
+so results copied in from a GPU box are invisible to it.
+
+A run whose checkpoint will not load (an architecture change since it was
+trained, usually) is reported and skipped rather than aborting the rest.
 
 Both engines are used, for different jobs: :class:`VariationalInference` is the
 only one that consults the guide, so it does the encoding; the ancestral engine
@@ -44,18 +51,16 @@ when an approximate number will do.
 import csv
 import logging
 import math
-import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import hydra
 import torch
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import get_original_cwd, instantiate
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from conceptarium.evaluate import load_job
-from conceptarium.registry import load_registry
 from conceptarium.resolvers import register_custom_resolvers
 from conceptarium.utils import (
     attach_latent_encoder,
@@ -73,13 +78,63 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Rebuilding a finished run
 # ---------------------------------------------------------------------------
+def is_job_dir(path: Path) -> bool:
+    """Is ``path`` a finished Hydra *job* directory?
+
+    Needs both halves of a rebuildable run: the config Hydra wrote, and at least
+    one checkpoint. The checkpoint is also what stands in for the registry's
+    ``status: success`` — a run that crashed before saving one cannot be
+    analysed, whatever a CSV says about it. It additionally rules out a multirun
+    *sweep* directory, which carries a ``.hydra`` of its own but no checkpoints.
+    """
+    return (path / ".hydra" / "config.yaml").is_file() and any(
+        (path / "checkpoints").glob("*.ckpt")
+    )
+
+
+def matches_filters(job_dir: Path, filters: Optional[dict]) -> bool:
+    """Does the run's own saved config satisfy every ``dotted.key: value``?"""
+    if not filters:
+        return True
+    try:
+        job_cfg = OmegaConf.load(job_dir / ".hydra" / "config.yaml")
+    except Exception:  # unreadable config -- treat as non-matching, not fatal
+        return False
+    for key, wanted in filters.items():
+        found = OmegaConf.select(job_cfg, key)
+        if found is None or str(found) != str(wanted):
+            return False
+    return True
+
+
+def find_job_dirs(roots: Sequence[Path], filters: Optional[dict]) -> List[Path]:
+    """Every matching job directory under ``roots``, oldest first.
+
+    Walks the filesystem rather than consulting ``runs.csv``. The registry
+    records absolute paths from the machine that did the training and is not
+    written at all under ``debug: true``, so a run copied in from a GPU box — the
+    normal way results arrive here — is invisible to it while sitting in plain
+    sight on disk. The configs Hydra saves next to each checkpoint carry
+    everything discovery needs, so this reads those instead.
+    """
+    seen: Dict[Path, None] = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for config in sorted(root.rglob(".hydra/config.yaml")):
+            job_dir = config.parent.parent
+            if is_job_dir(job_dir) and matches_filters(job_dir, filters):
+                seen.setdefault(job_dir.resolve(), None)
+    return sorted(seen, key=lambda p: p.stat().st_mtime)
+
+
 def resolve_job_dirs(cfg: DictConfig) -> List[Path]:
     """Every Hydra job directory to analyse, oldest first.
 
     An explicit ``job_dir`` wins and may be a single path or a list. Otherwise
-    the registry is filtered by ``filters``: with ``all_jobs`` **every** match is
-    returned, which is what a sweep wants — one set of figures per trained model
-    — and without it only the newest.
+    every run under ``search_dirs`` whose saved config matches ``filters`` is
+    returned — one set of figures per trained model, which is what comparing a
+    sweep needs. With ``all_jobs: false`` only the newest is kept.
     """
     if cfg.get("job_dir"):
         given = cfg.job_dir
@@ -87,18 +142,29 @@ def resolve_job_dirs(cfg: DictConfig) -> List[Path]:
             return [Path(given)]
         return [Path(d) for d in given]
 
-    csv_path = os.path.join(get_original_cwd(), "conceptarium", cfg.csv_path)
+    # Relative roots resolve against the directory the script was launched from.
+    # `get_original_cwd` needs an initialised HydraConfig, which is true for the
+    # scripts but not for a caller poking at this from a test or a REPL.
+    try:
+        base = Path(get_original_cwd())
+    except ValueError:
+        base = Path.cwd()
+    roots = [Path(d) if Path(d).is_absolute() else base / d
+             for d in cfg.get("search_dirs") or ["outputs"]]
     filters = dict(cfg.filters) if cfg.get("filters") else None
-    rows = load_registry(csv_path, filters=filters)
-    if not rows:
+    found = find_job_dirs(roots, filters)
+    if not found:
         raise SystemExit(
-            f"No runs in {csv_path} matching {filters}. Train one first:\n"
+            "No runs found under "
+            f"{[str(r) for r in roots]} matching {filters}.\n"
+            "Train one first:\n"
             "  python run_experiment.py --config-name cbgm dataset=colormnist\n"
-            "(note that `debug: true` suppresses registration), or pass "
+            "or point `search_dirs` at where the runs actually live, or pass "
             "job_dir=<hydra job dir> explicitly."
         )
-    selected = rows if cfg.get("all_jobs") else rows[-1:]
-    return [Path(row["run_dir"]) for row in selected]
+    logger.info("found %d matching run(s) under %s",
+                len(found), [str(r) for r in roots])
+    return found if cfg.get("all_jobs", True) else found[-1:]
 
 
 def resolve_job_dir(cfg: DictConfig) -> Path:

@@ -22,12 +22,17 @@ hydra:
   run:
     dir: "outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}_${hydra.job.name}"
 
-# Explicit Hydra job directory to analyse. When null, the newest registry row
-# matching `filters` is used.
+# Explicit Hydra job directory to diagnose. When null, `search_dirs` is scanned
+# and the NEWEST matching run is used -- this script reports on one model at a
+# time, unlike run_generative_analysis.py.
 job_dir: null
-csv_path: runs.csv
+
+# See conf/generative_analysis.yaml for why discovery walks the filesystem
+# instead of reading runs.csv.
+search_dirs:
+  - outputs
+  - ../outputs
 filters:
-  status: success
   model.model_cls._target_: torch_concepts.nn.ConceptBottleneckGenerativeModel
 
 seed: 42
