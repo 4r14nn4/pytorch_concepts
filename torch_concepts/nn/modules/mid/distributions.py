@@ -41,7 +41,7 @@ distribution, add its :class:`DistributionSpec` to :data:`SPECS` here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache, partial
 from typing import Callable, Dict, Mapping, Optional, Tuple
 
@@ -100,6 +100,22 @@ def _relaxed_bernoulli(params, temperature, validate_args):
 
 def _relaxed_one_hot(params, temperature, validate_args):
     return dist.RelaxedOneHotCategorical(
+        temperature=temperature, **params, validate_args=validate_args
+    )
+
+
+# Straight-through counterparts. Declaring a variable with one of these is how a
+# model asks for a *hard* draw — an exact bit / one-hot row forward, soft gradient
+# backward — instead of the soft Concrete sample the plain relaxed families give.
+def _relaxed_bernoulli_st(params, temperature, validate_args):
+    d = _pyro_dist.RelaxedBernoulliStraightThrough(
+        temperature=temperature, **params, validate_args=validate_args
+    )
+    return dist.Independent(d, 1, validate_args=validate_args)
+
+
+def _relaxed_one_hot_st(params, temperature, validate_args):
+    return _pyro_dist.RelaxedOneHotCategoricalStraightThrough(
         temperature=temperature, **params, validate_args=validate_args
     )
 
@@ -376,6 +392,22 @@ SPECS: Dict[type, DistributionSpec] = {
         param_activations={"scale_tril": _tril_activation},
     ),
 }
+
+# Pyro's straight-through families, registered under their own keys so
+# ``_lookup``'s exact match wins over the subclass scan — without these they
+# resolve to their plain relaxed base and silently sample *soft*. Pyro is an
+# optional dependency, hence the guard.
+try:
+    import pyro.distributions as _pyro_dist
+except ImportError:  # pragma: no cover - pyro not installed
+    _pyro_dist = None
+else:
+    SPECS[_pyro_dist.RelaxedBernoulliStraightThrough] = replace(
+        SPECS[dist.RelaxedBernoulli], relaxed=_relaxed_bernoulli_st
+    )
+    SPECS[_pyro_dist.RelaxedOneHotCategoricalStraightThrough] = replace(
+        SPECS[dist.RelaxedOneHotCategorical], relaxed=_relaxed_one_hot_st
+    )
 
 #: ``{family: default constructor kwargs}``, derived from the registry. The
 #: high-level models seed each variable's ``dist_kwargs`` from this, so a new

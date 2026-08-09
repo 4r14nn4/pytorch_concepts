@@ -169,32 +169,18 @@ def attach_latent_encoder(cfg: DictConfig, backbone: nn.Module) -> nn.Module:
 
 def update_config_from_data(cfg: DictConfig, dm: ConceptDataModule) -> DictConfig:
     """Update model configuration from datamodule properties.
-    
-    Automatically configures model input size, backbone, and embedding settings
-    based on the datamodule's dataset properties. This ensures model architecture
-    matches the data dimensions.
-    
-    Args:
-        cfg: Hydra DictConfig containing model configuration.
-        dm: ConceptDataModule instance with dataset information.
-        
-    Also publishes the data-derived sizes under a model-neutral ``data_dims``
-    node, so a config can interpolate them where plain YAML cannot compute them:
 
-    * ``data_dims.n_pixels`` — flattened input width (``prod(n_features)``);
-    * ``data_dims.n_concepts`` — number of annotated concepts.
-
-    A generative model's decoder needs both — its output is ``n_pixels`` wide and
-    its input is a function of ``n_concepts`` — and neither is knowable before the
-    datamodule is built.
+    Sets ``model.input_size`` from the data, and publishes ``data_dims``
+    (``n_pixels``, ``n_concepts``) for configs to interpolate — a generative
+    decoder is sized from both, and neither is known before the datamodule is
+    built.
 
     Args:
         cfg: Hydra DictConfig containing model configuration.
         dm: ConceptDataModule instance with dataset information.
 
     Returns:
-        Updated cfg with model.input_size, model.backbone, and
-        model.embs_precomputed set from datamodule.
+        The updated cfg.
     """
     with open_dict(cfg):
         cfg.model.model_cls.update(

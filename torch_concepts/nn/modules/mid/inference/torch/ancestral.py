@@ -14,11 +14,13 @@ from .utils import sample_from
 class AncestralSamplingInference(ForwardInference):
     """Forward inference engine that draws samples ancestrally.
 
-    By default, discrete variables are drawn from their relaxed (Concrete /
-    Gumbel-Softmax) surrogate and the *soft* sample is what propagates to
-    descendants — no straight-through estimator is applied unless ``hard=True``
-    (see below). A temperature schedule controls the sharpness of the relaxed
-    distributions over the course of training.
+    Discrete variables are drawn from their relaxed (Concrete / Gumbel-Softmax)
+    surrogate, and a temperature schedule controls its sharpness over the course
+    of training. Whether the propagated draw is **soft or hard** is a property of
+    the variable's declared family, not of this engine: declare it
+    ``Bernoulli`` / ``RelaxedBernoulli`` for a soft Concrete sample, or
+    ``RelaxedBernoulliStraightThrough`` for an exact bit with a soft gradient
+    (likewise ``OneHotCategorical`` / ``RelaxedOneHotCategoricalStraightThrough``).
 
     Parameters
     ----------
@@ -41,13 +43,6 @@ class AncestralSamplingInference(ForwardInference):
         level concurrently (see :meth:`ForwardInference.predict_level`). Because
         sampling consumes the global RNG, enabling this makes the draw order
         across a level non-deterministic. Defaults to ``False``.
-    hard : bool
-        If ``True``, a discrete variable's draw is quantized to its exact mode (a
-        ``0.``/``1.`` bit, a one-hot row) by a straight-through estimator before
-        it propagates: hard forward value, soft gradient. Continuous families are
-        unaffected. Set it when a descendant mixes by the sampled score (e.g. a
-        concept bottleneck), where a soft draw decodes a blend of every state
-        rather than a real assignment. Defaults to ``False``.
     """
 
     name = "AncestralSamplingInference"
@@ -58,7 +53,6 @@ class AncestralSamplingInference(ForwardInference):
         pgm: BayesianNetwork,
         p_int: float = 1.0,
         parallelize_levels: bool = False,
-        hard: bool = False,
         **temperature_kwargs,
     ):
         # The temperature schedule is not re-declared here: it belongs to every
@@ -69,7 +63,6 @@ class AncestralSamplingInference(ForwardInference):
             parallelize_levels=parallelize_levels,
             **temperature_kwargs,
         )
-        self.hard = bool(hard)
 
     def _resolve(
         self,
@@ -78,4 +71,4 @@ class AncestralSamplingInference(ForwardInference):
         temperature: torch.Tensor,
     ) -> torch.Tensor:
         """A reparameterised draw from the variable's relaxed distribution."""
-        return sample_from(variable, params, temperature, hard=self.hard)
+        return sample_from(variable, params, temperature)

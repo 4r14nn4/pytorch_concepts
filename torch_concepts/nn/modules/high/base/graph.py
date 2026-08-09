@@ -142,49 +142,32 @@ class DirectedGraphModel(GraphModel, ABC):
     #: layer output is fed raw and activated by the distribution downstream.
     param_for_discrete_var: str = "logits"
 
-    def _flexible_parametrization(self, variable, first, second=None):
+    def _flexible_parametrization(self, variable, first, second=None, activate=True):
         """Build a ``ParametricCPD`` parametrization dict from ``variable``'s distribution.
 
-        The dict's keys are the distribution's parameter names — taken from
-        :class:`~torch_concepts.nn.modules.mid.distributions.DistributionSpec` and exposed
-        per-variable as ``variable.param_sizes``:
-
-        * **Discrete** families (Bernoulli / Categorical and their relaxed variants)
-          use a single parameter, ``"probs"`` or ``"logits"`` as set by
-          :attr:`param_for_discrete_var`, parametrized by ``first``.
-        * **Delta** uses the single ``"value"`` parameter, parametrized by ``first``.
-        * **Continuous** families (Normal, MultivariateNormal) need two parameters:
-          the location (``"loc"``) from ``first`` and a scale parameter (``"scale"``
-          or ``"scale_tril"``) from ``second``.
-
-        **Pass raw heads.** Every head is composed with the activation that lands
-        its output in its own parameter's domain (see :meth:`_activate`), so a
-        head that squashes its own output would be activated twice. This is
-        uniform across parameters — there is no head that is left alone and no
-        head that is wrapped, which is the whole point: the rule is the same
-        wherever you look. Note it applies to *this* helper only; a
-        :class:`ParametricCPD` built by hand still applies no activation of its
-        own, and its modules must already emit a valid parameter.
-
-        ``first`` and ``second`` are two **independent** heads. Whatever they
-        share belongs in the CPD's ``trunk`` (see :class:`ParametricCPD`), which
-        runs once and feeds both — so a shared feature extractor costs one
-        forward pass, not two. Do not put the *whole* head in the trunk and leave
-        the parameters bare: two bare heads over one trunk make the scale a fixed
-        function of the location.
+        The dict's keys are the distribution's parameter names, taken from
+        ``variable.param_sizes``: a single ``"probs"``/``"logits"`` (discrete, as
+        set by :attr:`param_for_discrete_var`) or ``"value"`` (Delta) from
+        ``first``; or ``"loc"`` from ``first`` plus ``"scale"``/``"scale_tril"``
+        from ``second`` (continuous).
 
         Parameters
         ----------
         variable : Variable
             The child variable whose CPD parametrization is being built.
         first : nn.Module
-            Raw layer producing the primary parameter (logits / probs / value / loc).
+            Layer producing the primary parameter (logits / probs / value / loc).
         second : nn.Module, optional
-            The continuous variable's raw scale head: a layer, or an unbuilt
+            The continuous variable's scale head: a layer, or an unbuilt
             :class:`~torch_concepts.nn.LazyConstructor` sized by the CPD from the
             parents just like ``first``. Ignored for discrete / Delta variables,
-            which have no second parameter — so a caller whose variables may be
-            of any type can pass one unconditionally and it is simply unused.
+            so a caller whose variables may be of any type can pass one
+            unconditionally.
+        activate : bool, default True
+            Compose each head with the activation landing its output in its own
+            parameter's domain (:meth:`_activate`) — so the heads are passed
+            **raw**. Set ``False`` when a head already emits a valid parameter,
+            which would otherwise be activated twice (``sigmoid(sigmoid(x))``).
 
         Raises
         ------
@@ -196,10 +179,10 @@ class DirectedGraphModel(GraphModel, ABC):
         names = set(param_sizes)
 
         if names == {"value"}:
-            return {"value": self._activate(variable, "value", first)}
+            return {"value": self._activate(variable, "value", first, activate)}
         if names == {"probs", "logits"}:
             param = self.param_for_discrete_var
-            return {param: self._activate(variable, param, first)}
+            return {param: self._activate(variable, param, first, activate)}
         if "loc" in names:
             # Normal, MultivariateNormal, etc., with a location and a scale parameter
             scale_param = (names - {"loc"}).pop() # either ``scale`` or ``scale_tril``
@@ -212,16 +195,19 @@ class DirectedGraphModel(GraphModel, ABC):
                     "`first` belongs in the CPD's `trunk`, which runs once for both."
                 )
             return {
-                "loc": self._activate(variable, "loc", first),
-                scale_param: self._activate(variable, scale_param, second),
+                "loc": self._activate(variable, "loc", first, activate),
+                scale_param: self._activate(variable, scale_param, second, activate),
             }
         raise ValueError(
             f"_flexible_parametrization: unsupported distribution "
             f"{variable.distribution.__name__} for variable {variable.name!r}."
         )
 
-    def _activate(self, variable, param, head) -> nn.Module:
+    def _activate(self, variable, param, head, activate=True) -> nn.Module:
         """Compose ``head`` with the activation for ``param``'s domain.
+
+        A no-op when ``activate`` is False: the head already emits a valid
+        parameter.
 
         ``head`` may be an unbuilt :class:`~torch_concepts.nn.LazyConstructor`;
         the CPD sizes it from the parents and this parameter's width when it
@@ -229,6 +215,8 @@ class DirectedGraphModel(GraphModel, ABC):
         which is how a ``scale_tril`` head gets its ``size * (size + 1) // 2``
         outputs rather than ``size``.
         """
+        if not activate:
+            return head
         activation = self._param_activation(variable, param)
         # An unconstrained parameter (`logits`, `loc`, a Delta's `value`) resolves
         # to the identity. Return the head untouched there rather than wrapping it

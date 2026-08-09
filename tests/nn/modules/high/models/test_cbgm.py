@@ -301,7 +301,7 @@ class TestNormalObservation:
 
         concepts = [v for v in model.pgm.variables.values() if v.variable_type == "concept"]
         query = ["input", *(v.name for v in concepts)]
-        engine = AncestralSamplingInference(model.pgm, p_int=1.0, hard=True)
+        engine = AncestralSamplingInference(model.pgm, p_int=1.0)
 
         out = engine.query(query=query, evidence={}, n_samples=3)
         flat_size = image_shape[0] * image_shape[1] * image_shape[2]
@@ -406,10 +406,16 @@ class TestSoftMixing:
         forced = self._model(annotations, False).default_query(ground_truth)["a"]
         assert torch.equal(forced, ground_truth)
 
-    def test_soft_mixing_switches_the_engines_to_soft_draws(self):
+    def test_soft_mixing_does_not_configure_the_engine(self):
+        """`soft_mixing` controls the query only.
+
+        Whether a discrete draw is soft or hard follows from the concept's
+        declared family, so no engine carries a switch for it.
+        """
         annotations = Annotations(labels=["a"], cardinalities=[1], types=["binary"])
-        assert self._model(annotations, True).train_inference.hard is False
-        assert self._model(annotations, False).train_inference.hard is True
+        for soft_mixing in (True, False):
+            engine = self._model(annotations, soft_mixing).train_inference
+            assert not hasattr(engine, "hard")
 
     def test_fixed_scale_head_has_no_parameters(self):
         annotations = Annotations(labels=["a"], cardinalities=[1], types=["binary"])

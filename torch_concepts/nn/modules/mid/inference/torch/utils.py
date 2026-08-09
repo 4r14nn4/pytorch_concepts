@@ -112,9 +112,8 @@ def propagated_value(
 def _apply_mode(variable: Variable, value: torch.Tensor) -> torch.Tensor:
     """Quantize an already-activated value to the family's hard mode.
 
-    Shared tail of :func:`mode_value` and :func:`sample_from`'s ``hard=True``
-    path: both start from a value in the *activated* domain (probs, not logits)
-    and need the same per-member rule. Splitting into one row per member first
+    Starts from a value in the *activated* domain (probs, not logits) and applies
+    the family's per-member rule. Splitting into one row per member first
     makes a ``k``-member categorical plate take ``k`` argmaxes rather than one
     over the flattened ``k * member_size`` columns — every family that declares
     a rule has one scalar per event element, so ``member_size`` is exactly its
@@ -149,16 +148,13 @@ def sample_from(
     variable: Variable,
     params: Dict[str, torch.Tensor],
     temperature: torch.Tensor,
-    hard: bool = False,
 ) -> torch.Tensor:
     """Reparameterised sample for the given variable.
 
-    With ``hard=True`` a discrete draw is quantized to its exact mode by a
-    straight-through estimator — hard forward value, soft gradient. Families
-    with no mode rule (:func:`_apply_mode`) are unaffected.
+    Soft or hard is decided by the **declared family**, not by the engine: a
+    variable declared ``Bernoulli`` / ``RelaxedBernoulli`` draws a soft Concrete
+    sample, while ``RelaxedBernoulliStraightThrough`` draws an exact bit with a
+    soft gradient. Both resolve through the family's ``relaxed`` factory (see
+    :func:`build_relaxed_distribution`).
     """
-    soft = build_relaxed_distribution(variable, params, temperature).rsample()
-    if not hard:
-        return soft
-    hard_value = _apply_mode(variable, soft)
-    return soft + (hard_value - soft).detach()
+    return build_relaxed_distribution(variable, params, temperature).rsample()

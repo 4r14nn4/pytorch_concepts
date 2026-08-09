@@ -37,7 +37,7 @@ from .....annotations import Annotations
 from .....concept_graph import ConceptGraph
 from .....distributions import Delta
 from ...low.dense_layers import LinearEmbeddingEncoder, NonLinearEmbeddingEncoder
-from ...low.predictors.mix import MixConceptEmbeddingToEmbedding
+from ...low.predictors.mix import MixConceptEmbedding
 from ...low.priors import FixedPrior
 from ...low.scales import GlobalScale
 from ...mid.inference.base import BaseInference
@@ -54,7 +54,7 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
 
     Generative process ``z → concepts → input``, trained as a VAE through a
     variational guide ``q(z | input)``. The concept bottleneck layer
-    (:class:`~torch_concepts.nn.MixConceptEmbeddingToEmbedding`) sits between the
+    (:class:`~torch_concepts.nn.MixConceptEmbedding`) sits between the
     two halves of the decoder, so intervening on a concept steers the generated
     output.
 
@@ -133,9 +133,13 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
         receive reconstruction gradient: under a hard score the unselected state
         gets exactly zero, is trained only by the concept head, and is therefore
         an untrained input to the decoder when an intervention selects it — which
-        is what makes a hard-mixed model unsteerable. Also flips the inference
-        engines to soft discrete draws, unless ``hard=`` is passed explicitly in
-        ``inference_kwargs``.
+        is what makes a hard-mixed model unsteerable.
+
+        This controls the *query* only. Whether the engine's discrete draws are
+        themselves soft is a property of the concepts' declared family: keep them
+        ``Bernoulli`` / ``OneHotCategorical`` (the class defaults) for soft
+        Concrete draws, or declare the ``*StraightThrough`` families for hard
+        ones.
     inference, inference_kwargs, train_inference, train_inference_kwargs
         Inference engine configuration. Defaults to
         :class:`~torch_concepts.nn.VariationalInference`, with the guide on
@@ -198,7 +202,7 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
 
     See Also
     --------
-    torch_concepts.nn.MixConceptEmbeddingToEmbedding : the concept bottleneck layer
+    torch_concepts.nn.MixConceptEmbedding : the concept bottleneck layer
     torch_concepts.nn.functional.concept_orthogonality : the orthogonality penalty
     torch_concepts.nn.GlobalScale : the default ``scale`` head for a Normal observation
     """
@@ -268,15 +272,10 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
 
         self.pgm = self._build_model()
 
-        # The guide q(z | input), plus — only when `soft_mixing` asks for it —
-        # the soft discrete draws it needs to actually be soft. Injected only in
-        # that case: engines that cannot sample softly (DeterministicInference,
-        # MAPForwardInference) take no `hard` argument, so passing it always
-        # would break every engine but the sampling ones. An explicit `hard=` in
-        # ``inference_kwargs`` still wins.
+        # The guide q(z | input). Whether the engine's discrete draws are soft or
+        # hard is not set here: it follows from the concepts' declared family
+        # (see `variable_distributions`).
         guide = {"latents": {"z": self._build_guide()}}
-        if soft_mixing:
-            guide["hard"] = False
         self.setup_inference(
             inference,
             {**guide, **(inference_kwargs or {})},
@@ -463,7 +462,7 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
                 "embeddings": torch.cat(list(embeddings.values()), dim=-2),
             }
 
-        mixer = MixConceptEmbeddingToEmbedding(
+        mixer = MixConceptEmbedding(
             in_concepts=reordered_axis, # require Annotations as in_concepts
             in_embeddings=self.embedding_size,
             # A binary concept's two state embeddings (w+, w-) already arrive as

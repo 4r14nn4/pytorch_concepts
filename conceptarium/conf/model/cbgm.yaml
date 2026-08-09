@@ -73,16 +73,20 @@ model_cls:
   # by a score in (0, 1). Under a hard 0/1 score the unselected state embedding
   # receives EXACTLY zero reconstruction gradient, so an intervention that
   # selects it feeds the decoder an input it was never trained on — which is why
-  # a hard-mixed model does not steer. Also switches both inference engines to
-  # soft discrete draws, so train and test see the same kind of code.
+  # a hard-mixed model does not steer.
+  #
+  # This decides the QUERY only. Whether the engine's draws are themselves soft
+  # follows from `variable_distributions` below.
   soft_mixing: true
 
   # Base families, restoring CBGM's own class defaults over the relaxed ones
-  # `_commons` sets for the discriminative models. Keep them plain: the engine
-  # relaxes them itself when it samples (Concrete under `soft_mixing`, its
-  # straight-through variant otherwise), and torch's Relaxed* families are
-  # TransformedDistributions rather than subclasses of Bernoulli /
-  # OneHotCategorical, so naming them here would miss that dispatch entirely.
+  # `_commons` sets for the discriminative models. These plain families give
+  # SOFT Concrete draws, which is what `soft_mixing` above needs: gradient
+  # reaches every state of every concept. Swap in
+  # `pyro.distributions.RelaxedBernoulliStraightThrough` /
+  # `RelaxedOneHotCategoricalStraightThrough` for hard (exact bit / one-hot)
+  # draws with a straight-through gradient instead — that choice is the ONLY
+  # thing controlling it, no engine flag is involved.
   variable_distributions:
     binary:
       _target_: hydra.utils.get_class

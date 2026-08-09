@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from torch_concepts import Annotations
-from torch_concepts.nn import MixConceptEmbeddingToConcept, MixConceptEmbeddingToEmbedding
+from torch_concepts.nn import MixConceptEmbeddingToConcept, MixConceptEmbedding
 from torch_concepts.nn.modules.low.predictors.mix import MixSumConceptEmbeddingToConcept
 
 
@@ -153,13 +153,13 @@ class TestMixConceptEmbeddingBinaryStates:
         heard of it gets the historical single-embedding-per-binary-concept
         layout untouched."""
         aa = _axis(2, cardinalities=[1, 1])
-        layer = MixConceptEmbeddingToEmbedding(in_concepts=aa, in_embeddings=8)
+        layer = MixConceptEmbedding(in_concepts=aa, in_embeddings=8)
         assert layer.expand_binary_embeddings is True
         assert layer.bernoulli_to_categorical_embedding_splitter is not None
 
     def test_expand_false_allocates_no_splitter_and_zero_parameters(self):
         aa = _axis(2, cardinalities=[1, 1])
-        layer = MixConceptEmbeddingToEmbedding(
+        layer = MixConceptEmbedding(
             in_concepts=aa, in_embeddings=8, expand_binary_embeddings=False,
         )
         assert layer.bernoulli_to_categorical_embedding_splitter is None
@@ -169,7 +169,7 @@ class TestMixConceptEmbeddingBinaryStates:
         """No binary concept in the annotation -> nothing to expand, so the
         splitter is dead weight regardless of the flag."""
         aa = _axis(6, cardinalities=[3, 3])
-        layer = MixConceptEmbeddingToEmbedding(in_concepts=aa, in_embeddings=8)
+        layer = MixConceptEmbedding(in_concepts=aa, in_embeddings=8)
         assert layer.bernoulli_to_categorical_embedding_splitter is None
 
     def test_row_count_contract_binary_plus_categorical(self):
@@ -179,14 +179,14 @@ class TestMixConceptEmbeddingBinaryStates:
         embeddings_pre_expanded = torch.randn(2, 5, 8)
         concepts = torch.rand(2, 4)
 
-        layer_false = MixConceptEmbeddingToEmbedding(
+        layer_false = MixConceptEmbedding(
             in_concepts=aa, in_embeddings=8, expand_binary_embeddings=False,
         )
         out_false = layer_false(concepts=concepts, embeddings=embeddings_pre_expanded)
         assert out_false.shape == (2, 2, 8)  # 2 groups: the binary concept + the categorical one
 
         embeddings_unexpanded = torch.randn(2, 4, 8)  # 1 row per binary concept, old convention
-        layer_true = MixConceptEmbeddingToEmbedding(in_concepts=aa, in_embeddings=8)
+        layer_true = MixConceptEmbedding(in_concepts=aa, in_embeddings=8)
         out_true = layer_true(concepts=concepts, embeddings=embeddings_unexpanded)
         assert out_true.shape == (2, 2, 8)
 
@@ -195,7 +195,7 @@ class TestMixConceptEmbeddingBinaryStates:
         a genuine convex combination of the two — the headline property this
         change exists for."""
         aa = _axis(1, cardinalities=[1])
-        layer = MixConceptEmbeddingToEmbedding(
+        layer = MixConceptEmbedding(
             in_concepts=aa, in_embeddings=8, expand_binary_embeddings=False,
         )
         w_plus = torch.randn(3, 1, 8)
@@ -215,7 +215,7 @@ class TestMixConceptEmbeddingBinaryStates:
 
     def test_buffers_are_non_persistent(self):
         aa = _axis(2, cardinalities=[1, 1])
-        layer = MixConceptEmbeddingToEmbedding(in_concepts=aa, in_embeddings=8)
+        layer = MixConceptEmbedding(in_concepts=aa, in_embeddings=8)
         buffer_names = dict(layer.named_buffers())
         assert "cardinalities_expanded" in buffer_names
         assert "binary_concept_columns" in buffer_names

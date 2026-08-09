@@ -193,7 +193,7 @@ def concept_orthogonality(context: torch.Tensor, n_concepts: int) -> torch.Tenso
         context: Concept bottleneck of shape ``(batch_size, (n_concepts + 1) * emb_size)``
             -- the ``n_concepts`` mixed concept contexts followed by the
             unsupervised one, as produced by
-            :class:`~torch_concepts.nn.MixConceptEmbeddingToEmbedding`.
+            :class:`~torch_concepts.nn.MixConceptEmbedding`.
         n_concepts: Number of supervised concepts (``k``).
 
     Returns:

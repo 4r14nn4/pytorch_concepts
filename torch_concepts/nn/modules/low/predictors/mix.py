@@ -7,11 +7,14 @@ from typing import List, Union
 
 
 class MixConceptEmbedding(BaseConceptLayer):
-    """Shared machinery of the concept/embedding mixture layers.
+    """Mix each concept's state embeddings by its predicted score.
 
-    Holds the per-group mixture :math:`\\hat{c}_i w^+_i + (1 - \\hat{c}_i) w^-_i`
-    of "Concept Embedding Models" (Espinosa Zarlenga et al., NeurIPS 2022) and
-    nothing else: subclasses add whatever head consumes the mixed embeddings.
+    The per-group mixture :math:`\\hat{c}_i w^+_i + (1 - \\hat{c}_i) w^-_i` of
+    "Concept Embedding Models" (Espinosa Zarlenga et al., NeurIPS 2022), emitting
+    the mixed contexts ``(batch, k, in_embeddings)`` directly. This is the
+    concept bottleneck of a generative model — the caller concatenates the
+    unsupervised context :math:`w_{k+1}` to obtain the full bottleneck.
+    Subclasses add whatever head consumes the mixture instead.
 
     A binary concept scores one Bernoulli probability but always mixes **two**
     state embeddings, :math:`w^+` and :math:`w^-`. ``expand_binary_embeddings``
@@ -26,19 +29,36 @@ class MixConceptEmbedding(BaseConceptLayer):
         in_concepts: Annotations of the input concepts (their cardinalities and
             types drive the grouping).
         in_embeddings: Number of embedding features per state.
-        out_concepts: Output width, interpreted by the subclass.
+        out_concepts: Output width, interpreted by the subclass. Defaults to the
+            mixture's own flattened width, ``in_embeddings * k``.
         expand_binary_embeddings: Fabricate a binary concept's second state
             embedding from its first. Default ``True`` (the historical contract).
+
+    Example:
+        >>> import torch
+        >>> from torch_concepts import Annotations
+        >>> from torch_concepts.nn import MixConceptEmbedding
+        >>>
+        >>> in_ann = Annotations(labels=['digit', 'color'], cardinalities=[10, 2])
+        >>> layer = MixConceptEmbedding(in_concepts=in_ann, in_embeddings=16)
+        >>>
+        >>> concepts = torch.rand(4, 12)          # (batch, 10 + 2 state scores)
+        >>> embeddings = torch.randn(4, 12, 16)   # (batch, states, m)
+        >>> layer(concepts=concepts, embeddings=embeddings).shape
+        torch.Size([4, 2, 16])
     """
 
     def __init__(
         self,
         in_concepts: Annotations,
         in_embeddings: Union[int, Annotations],
-        out_concepts: Union[int, Annotations],
+        out_concepts: Union[int, Annotations] = None,
         expand_binary_embeddings: bool = True,
         **kwargs,
     ):
+        if out_concepts is None:
+            # The mixture's own output: one context per concept, flattened.
+            out_concepts = in_embeddings * len(in_concepts.cardinalities)
         super().__init__(
             in_concepts=in_concepts,
             in_embeddings=in_embeddings,
@@ -80,6 +100,9 @@ class MixConceptEmbedding(BaseConceptLayer):
         :attr:`expand_binary_embeddings` — its embedding row to two. Returns
         ``c_mix`` of shape ``(batch, n_groups, in_embeddings)``; subclasses vary
         only the final aggregation.
+
+        The mixture is a *segment* sum over the group boundaries, so group
+        ``i``'s context is built from group ``i``'s rows and scores alone.
         """
         idx = self.binary_concept_columns
         if len(idx) > 0:
@@ -94,6 +117,24 @@ class MixConceptEmbedding(BaseConceptLayer):
             concepts,
             groups=self.cardinalities_expanded.tolist(),
         )
+
+    def forward(
+        self,
+        concepts: torch.Tensor,
+        embeddings: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Mix the state embeddings by their concept scores.
+
+        Args:
+            concepts: Concept probabilities of shape ``(batch_size, n_states)``.
+            embeddings: State embeddings of shape ``(batch_size, n_states, in_embeddings)``.
+
+        Returns:
+            torch.Tensor: Mixed concept contexts of shape
+            ``(batch_size, k, in_embeddings)``.
+        """
+        return self._mix(concepts, embeddings)
 
 
 class MixConceptEmbeddingToConcept(MixConceptEmbedding):
@@ -186,98 +227,6 @@ class MixConceptEmbeddingToConcept(MixConceptEmbedding):
         c_mix = c_mix.flatten(start_dim=1)      # (batch, n_groups * in_embeddings)
         return self.predictor(c_mix)
 
-
-
-class MixConceptEmbeddingToEmbedding(MixConceptEmbedding):
-    """Concept bottleneck layer of a Concept Bottleneck Generative Model.
-
-    Mixes each concept's state embeddings by its predicted probability — the
-    CEM mixture, :math:`w_i = \\hat{c}_i w^+_i + (1 - \\hat{c}_i) w^-_i`. Unlike
-    :class:`MixConceptEmbeddingToConcept` there is no predictor head: the layer
-    emits the mixed contexts :math:`[w_1, \\dots, w_k]` themselves. The caller
-    concatenates the *unsupervised* context :math:`w_{k+1}` to obtain the full
-    bottleneck :math:`w`, which the post-concept-bottleneck network (a
-    generative model's decoder) consumes.
-
-    The pre-defined concepts are not assumed to be complete in a generative
-    setting, so the unsupervised context carries whatever they do not cover; an
-    orthogonality penalty
-    (:func:`~torch_concepts.nn.functional.concept_orthogonality`) keeps it from
-    simply re-encoding them.
-
-    Attributes:
-        in_concepts (Annotations): Input concept annotations.
-        in_embeddings (int): Number of embedding features per state.
-        out_concepts (int): Width of the bottleneck the caller assembles,
-            ``in_embeddings * (k + 1)`` — this layer contributes the first
-            ``in_embeddings * k`` of it.
-
-    Args:
-        in_concepts: Annotations of the ``k`` supervised concepts.
-        in_embeddings: Number of embedding features per state (``m``).
-
-    Example:
-        >>> import torch
-        >>> from torch_concepts import Annotations
-        >>> from torch_concepts.nn import MixConceptEmbeddingToEmbedding
-        >>>
-        >>> in_ann = Annotations(labels=['digit', 'color'], cardinalities=[10, 2])
-        >>> layer = MixConceptEmbeddingToEmbedding(in_concepts=in_ann, in_embeddings=16)
-        >>>
-        >>> concepts = torch.rand(4, 12)          # (batch, 10 + 2 state scores)
-        >>> embeddings = torch.randn(4, 12, 16)   # (batch, states, m)
-        >>>
-        >>> mixed = layer(concepts=concepts, embeddings=embeddings)
-        >>> mixed.shape
-        torch.Size([4, 2, 16])
-        >>>
-        >>> unknown = torch.randn(4, 1, 16)       # (batch, 1, m)
-        >>> torch.cat([mixed, unknown], dim=-2).shape   # the full bottleneck
-        torch.Size([4, 3, 16])
-
-    Note:
-        The paper defines the bottleneck as ``m(k + 1)`` wide — the concept
-        contexts plus the unsupervised one. The authors' released code
-        additionally prepends the concept probabilities themselves
-        (``g_latent += sum(concept_bins)``); this layer follows the paper.
-
-    References:
-        Ismail et al. "Concept Bottleneck Generative Models", ICLR 2024.
-        https://openreview.net/forum?id=L9U5MJJleF
-    """
-
-    def __init__(
-        self,
-        in_concepts: Annotations,
-        in_embeddings: int,
-        expand_binary_embeddings: bool = True,
-        **kwargs,
-    ):
-        super().__init__(
-            in_concepts=in_concepts,
-            in_embeddings=in_embeddings,
-            out_concepts=in_embeddings * (len(in_concepts.cardinalities) + 1),
-            expand_binary_embeddings=expand_binary_embeddings,
-        )
-
-    def forward(
-        self,
-        concepts: torch.Tensor,
-        embeddings: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Build the concept bottleneck.
-
-        Args:
-            concepts: Concept probabilities of shape ``(batch_size, n_states)``.
-            embeddings: State embeddings of shape ``(batch_size, n_states, in_embeddings)``.
-
-        Returns:
-            torch.Tensor: Mixed concept contexts of shape
-            ``(batch_size, k, in_embeddings)``. Concatenate the unsupervised
-            context along ``dim=-2`` for the full bottleneck.
-        """
-        return self._mix(concepts, embeddings)  # (batch, k, in_embeddings)
 
 
 class MixSumConceptEmbeddingToConcept(MixConceptEmbeddingToConcept):

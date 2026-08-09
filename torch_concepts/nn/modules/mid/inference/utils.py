@@ -202,6 +202,16 @@ EXACT_FAMILY: Dict[type, type] = {
     dist.RelaxedOneHotCategorical: dist.OneHotCategorical,
 }
 
+# The straight-through families are looked up by exact key too, so they need
+# their own entries — a subclass of RelaxedBernoulli does not match it here.
+try:
+    import pyro.distributions as _pyro_dist
+except ImportError:  # pragma: no cover - pyro not installed
+    pass
+else:
+    EXACT_FAMILY[_pyro_dist.RelaxedBernoulliStraightThrough] = dist.Bernoulli
+    EXACT_FAMILY[_pyro_dist.RelaxedOneHotCategoricalStraightThrough] = dist.OneHotCategorical
+
 
 def _splits_per_member(spec, params: Dict[str, torch.Tensor], variable: Variable) -> bool:
     """Whether ``variable``'s parameters can be folded into one row per member.

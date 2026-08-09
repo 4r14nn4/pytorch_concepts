@@ -18,10 +18,10 @@ unsupervised context away from the concept contexts.
 Experiment settings:
 - Dataset: Color-MNIST via ``ColorMNISTDataModule``, two categorical concepts
   (``digit`` 10-way, ``color`` 2-way), images flattened to 3x28x28 = 2352
-  Bernoulli pixels.
+  pixels modelled as a Gaussian observation.
 - Model: ``ConceptBottleneckGenerativeModel`` with MLP encoder/decoder.
 - Inference engine: Pyro ``VariationalInference`` with a guide on ``z``.
-- Loss: ``recon + kl + alpha * concept + beta * orthogonality``.
+- Loss: a ``CompositeLoss`` of ``recon + kl + alpha * concept + beta * orthogonality``.
 
 Expected outcome:
 - The ELBO terms go down and both concept accuracies climb well above chance
@@ -36,30 +36,25 @@ References:
 import math
 
 import torch
-import torch.nn.functional as F
-from torch.distributions import Bernoulli, Normal, kl_divergence
+from torch.distributions import Normal
 
 from torch_concepts import seed_everything
 from torch_concepts.data import ColorMNISTDataModule
-from torch_concepts.nn import ConceptBottleneckGenerativeModel, MLP
-from torch_concepts.nn.functional import concept_orthogonality
+from torch_concepts.nn import (
+    CompositeLoss,
+    ConceptBottleneckGenerativeModel,
+    ConceptLoss,
+    KLDivergenceLoss,
+    MLP,
+    NLLProbLoss,
+    OrthogonalityLoss,
+    ReconstructionLoss,
+)
 
 LATENT_SIZE = 32     # dim(z)
 EMBEDDING_SIZE = 16  # m, the width of one context embedding
 ALPHA = 5.0          # concept loss weight
 BETA = 1.0           # orthogonality loss weight
-
-
-def concept_loss(output, concepts, names):
-    """Negative log-likelihood of the ground-truth concepts under the bottleneck.
-
-    The model reports concept *probabilities* (as the reference implementation
-    does), so this is an explicit NLL rather than ``CrossEntropyLoss``.
-    """
-    return sum(
-        F.nll_loss(output.probs[name].clamp_min(1e-8).log(), concepts[:, i].long())
-        for i, name in enumerate(names)
-    )
 
 
 def concept_accuracy(output, concepts, names):
@@ -86,7 +81,7 @@ def main():
     concept_names = dataset.concept_names
 
     # The PGM keeps every variable on a single feature axis, so the image is a
-    # flat vector of Bernoulli pixels rather than a (3, 28, 28) tensor.
+    # flat vector of pixels rather than a (3, 28, 28) tensor.
     n_pixels = math.prod(dataset.n_features)
     context_size = (len(concept_names) + 1) * EMBEDDING_SIZE
 
@@ -96,13 +91,32 @@ def main():
         encoder=MLP(n_pixels, 256, LATENT_SIZE),
         latent_size=LATENT_SIZE,
         embedding_size=EMBEDDING_SIZE,
-        observation=Bernoulli,
+        # A Gaussian likelihood over pixel intensities: `loc` is the decoder's
+        # output and `scale` is one fixed sigma shared by every pixel, which
+        # keeps the reconstruction-to-KL ratio a hyper-parameter rather than
+        # something a learned sigma quietly anneals away.
+        observation=Normal,
+        scale_init=0.3,
+        scale_learnable=False,
         # Raw: the model composes the observation parameter's activation on top
-        # (here a sigmoid, for a Bernoulli's `probs`), so the MLP must not
-        # squash its own output or it would be activated twice.
+        # (the identity for a Normal's `loc`), so the MLP must not squash its
+        # own output — the network learns to land in [0, 1] itself.
         decoder=MLP(context_size, 256, n_pixels, n_layers=2, activation="leaky_relu"),
     )
     print(model)
+
+    # The ELBO, as four independent terms. `param_for_discrete_var` is "probs"
+    # on this model, so the concept term reads `probs` and needs NLLProbLoss
+    # rather than CrossEntropyLoss (which expects logits).
+    loss_fn = CompositeLoss(
+        terms=[
+            ReconstructionLoss(variable="input"),
+            KLDivergenceLoss(latents=["z"]),
+            ConceptLoss(categorical=NLLProbLoss(), categorical_param="probs"),
+            OrthogonalityLoss(variables=["mixing", "unknown"]),
+        ],
+        weights=[1.0, 1.0, ALPHA, BETA],
+    )
 
     # Every PGM variable is queried: the observed image arrives as `input`
     # (evidence), everything else is latent and reported by the engine.
@@ -116,29 +130,19 @@ def main():
             x = batch["inputs"]["x"].flatten(1)
             c = batch["concepts"]["c"]
             out = model(query=query, input=x)
+            # ReconstructionLoss scores the observed image, which the learner
+            # normally publishes here; outside Lightning we pass it ourselves.
+            out.extra = {"evidence": {"input": x}}
 
-            # Reconstruction and the Gaussian KL of the guide vs the N(0, I) prior.
-            recon = F.binary_cross_entropy(
-                out.probs["input"], x, reduction="none"
-            ).sum(-1).mean()
-            kl = kl_divergence(
-                Normal(out.guide_params["loc"]["z"], out.guide_params["scale"]["z"]),
-                Normal(out.loc["z"], out.scale["z"]),
-            ).sum(-1).mean()
-            concept = concept_loss(out, c, concept_names)
-            # The bottleneck is the mixed concept contexts followed by the
-            # unsupervised one; the PGM keeps them as two variables.
-            orthogonality = concept_orthogonality(
-                torch.cat([out.value["mixing"], out.value["unknown"]], dim=-1),
-                len(concept_names),
-            )
-
-            loss = recon + kl + ALPHA * concept + BETA * orthogonality
+            # `loss_fn(out, c)` would give the same scalar; the terms are taken
+            # one by one only so the per-term breakdown can be printed — an ELBO
+            # whose KL has collapsed looks fine in the total.
+            terms = [term(out, c) for term in loss_fn.terms]
+            loss = sum(w * t for w, t in zip(loss_fn.weights, terms))
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            totals += torch.tensor([recon.item(), kl.item(), concept.item(),
-                                    orthogonality.item()])
+            totals += torch.tensor([t.item() for t in terms])
 
         totals /= len(loader)
         print(f"epoch {epoch:03d} | recon {totals[0]:8.2f} | kl {totals[1]:6.2f} "
@@ -152,7 +156,7 @@ def main():
     with torch.no_grad():
         out = model(query=query, input=x)
     print("concept accuracy:", concept_accuracy(out, c, concept_names))
-    save_grid(x, out.probs["input"], "cbgm_colormnist_reconstruction.png")
+    save_grid(x, out.loc["input"].clamp(0, 1), "cbgm_colormnist_reconstruction.png")
 
 
 def save_grid(original, reconstruction, path):

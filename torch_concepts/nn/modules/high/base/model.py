@@ -401,13 +401,11 @@ class BaseModel(nn.Module, ABC):
 
         ``(B, k*rows, m) -> (B, k*out)`` for ``k = len(cvar.members)``, ``rows``
         embedding rows per member (:meth:`_embedding_rows`) and ``out =
-        cvar.member_size``. One shared ``Linear(m, 1)`` per state row when
-        ``rows == out`` (categorical, continuous — the CEM head); for a binary
-        concept, whose 2 rows feed 1 score, the CEM paper's joint
-        :math:`\\Psi_i([w^+, w^-])` instead — a ``Linear(2m, 1)`` reading both.
+        cvar.member_size``. Each member reads only its own rows.
 
-        Dropping the ``rows == out`` guard would make *every* head the joint
-        ``Linear(card*m, card)`` of Ismail et al., ICLR 2024.
+        One shared ``Linear(m, 1)`` per row when ``rows == out`` (categorical,
+        continuous); a binary concept's 2 rows feed 1 score, so they are read
+        jointly by a ``Linear(2m, 1)`` instead.
         """
         rows, m = evar.shape[0] // len(cvar.members), evar.shape[1]
         out = cvar.member_size
