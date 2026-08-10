@@ -42,17 +42,26 @@ device; ``max_eval_batches`` caps those passes, and ``n_fid_samples`` /
 """
 
 import logging
+import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import hydra
-import torch
-from hydra.utils import get_original_cwd
-from omegaconf import DictConfig, OmegaConf
+# Running this file as a script puts `analysis/` on sys.path, not `conceptarium/`,
+# so `conceptarium.*`, `env` and `analysis.*` would all be unreachable. Adding the
+# parent makes every invocation work the same way:
+#     python conceptarium/analysis/run_generative_analysis.py   (from the repo root)
+#     python analysis/run_generative_analysis.py                (from conceptarium/)
+#     python -m analysis.run_generative_analysis                (from conceptarium/)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from conceptarium.resolvers import register_custom_resolvers
-from conceptarium.utils import seed_everything
-from .generative_utils import (
+import hydra  # noqa: E402
+import torch  # noqa: E402
+from hydra.utils import get_original_cwd  # noqa: E402
+from omegaconf import DictConfig, OmegaConf  # noqa: E402
+
+from conceptarium.resolvers import register_custom_resolvers  # noqa: E402
+from conceptarium.utils import seed_everything  # noqa: E402
+from analysis.generative_utils import (  # noqa: E402
     METRICS,
     EvalContext,
     figure_overview,
@@ -66,7 +75,7 @@ from .generative_utils import (
     run_identity,
     write_results,
 )
-from torch_concepts.nn import AncestralSamplingInference
+from torch_concepts.nn import AncestralSamplingInference  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

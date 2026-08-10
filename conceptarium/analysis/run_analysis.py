@@ -19,6 +19,17 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 import logging
 logger = logging.getLogger(__name__)
 
+import sys
+from pathlib import Path
+
+# Running this file as a script puts `analysis/` on sys.path, not `conceptarium/`,
+# so `conceptarium.*` and `env` would be unreachable. Adding the parent makes
+# every invocation work the same way:
+#     python conceptarium/analysis/run_analysis.py   (from the repo root)
+#     python analysis/run_analysis.py                (from conceptarium/)
+#     python -m analysis.run_analysis                (from conceptarium/)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import pandas as pd
 import hydra
 from omegaconf import DictConfig, OmegaConf

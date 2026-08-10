@@ -1,10 +1,12 @@
 # =============================================================
 # Post-hoc analysis of trained generative concept models.
 #
-#   cd conceptarium
-#   python -m analysis.run_generative_analysis                 # EVERY cbgm run found
-#   python -m analysis.run_generative_analysis all_jobs=false  # only the newest
-#   python -m analysis.run_generative_analysis job_dir=outputs/multirun/.../0
+#   python conceptarium/analysis/run_generative_analysis.py                 # every cbgm run
+#   python conceptarium/analysis/run_generative_analysis.py all_jobs=false  # newest only
+#   python conceptarium/analysis/run_generative_analysis.py job_dir=<hydra job dir>
+#
+# Runs from anywhere: the repo root as above, or from `conceptarium/` as
+# `python analysis/run_generative_analysis.py` / `python -m analysis.run_generative_analysis`.
 #
 # Writes one results tree (see `results_dir`):
 #   results.csv                              one row per run
@@ -33,12 +35,17 @@ job_dir: null
 # Deliberately NOT runs.csv. The registry stores absolute paths from whichever
 # machine did the training and is not written at all under `debug: true`, so
 # runs copied in from a GPU box -- the normal way results arrive -- are invisible
-# to it while sitting in plain sight on disk. Both defaults below are listed
-# because experiments launched from `conceptarium/` land in `conceptarium/
-# outputs/`, while results copied to the repo root land in `outputs/`.
+# to it while sitting in plain sight on disk.
+#
+# Three entries so the same config works from either launch directory:
+# experiments launched from `conceptarium/` land in `conceptarium/outputs/`,
+# results copied to the repo root land in `outputs/`, and whichever of these is
+# the wrong guess simply does not exist. Overlapping entries are fine --
+# discovery resolves and de-duplicates the paths it finds.
 search_dirs:
   - outputs
   - ../outputs
+  - conceptarium/outputs
 
 # Applied to each run's own saved config, by dotted key. A run counts as finished
 # when it has a checkpoint, which is both the truth and the only thing that makes
