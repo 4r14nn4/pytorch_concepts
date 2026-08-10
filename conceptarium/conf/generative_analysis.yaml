@@ -71,9 +71,9 @@ max_eval_batches: null
 
 # Columns in overview.png (originals / reconstructions / generations).
 n_samples: 10
-# Quantise sampled concepts to a hard state before decoding. null follows the
-# model's own `soft_mixing` (soft if it was trained soft), which is what keeps
-# the decoder on the distribution it was trained on. true/false to force it.
-hard_sampling: null
+# NOTE: there is no `hard_sampling` key. Whether sampled concepts are quantised
+# to a hard state before decoding follows from their declared distribution
+# family, which the rebuilt model already carries from training -- so the decoder
+# is always on the distribution it was trained on, with nothing to set here.
 # Concepts to steer, one figure each. null = every concept in the model.
 steer_concepts: null

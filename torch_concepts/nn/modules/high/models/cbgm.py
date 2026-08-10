@@ -126,20 +126,6 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
         residual RMS, which shrinks as the fit improves and therefore keeps
         *raising* the effective reconstruction weight — annealing the KL away.
         Set ``False`` to pin the trade-off at ``scale_init``.
-    soft_mixing : bool, default False
-        If ``True``, concepts are sampled from their relaxed posteriors instead
-        of being teacher-forced, so the bottleneck mixes by a score in
-        ``(0, 1)``. This is what lets **both** of a concept's state embeddings
-        receive reconstruction gradient: under a hard score the unselected state
-        gets exactly zero, is trained only by the concept head, and is therefore
-        an untrained input to the decoder when an intervention selects it — which
-        is what makes a hard-mixed model unsteerable.
-
-        This controls the *query* only. Whether the engine's discrete draws are
-        themselves soft is a property of the concepts' declared family: keep them
-        ``Bernoulli`` / ``OneHotCategorical`` (the class defaults) for soft
-        Concrete draws, or declare the ``*StraightThrough`` families for hard
-        ones.
     inference, inference_kwargs, train_inference, train_inference_kwargs
         Inference engine configuration. Defaults to
         :class:`~torch_concepts.nn.VariationalInference`, with the guide on
@@ -171,15 +157,18 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
       ``bins=2``: two state embeddings ``w+``, ``w-`` read jointly by a
       ``Linear(2m, 1)``
       (:meth:`~torch_concepts.nn.modules.high.base.model.BaseModel.build_concept_head`).
-    * By default the mixture is **teacher-forced** on the ground-truth labels,
-      where the reference mixes by the predicted score. That grounds the concept
-      channel, but it also means an intervention *selects* a state rather than
-      forming the convex combination of Section 3.1 — and the unselected state
-      embedding never sees reconstruction gradient. ``soft_mixing=True`` restores
-      the reference's behaviour: concepts are sampled through the relaxation
-      (Gumbel-Softmax, endorsed by Appendix A of the paper, with the engine's
-      temperature schedule controlling it) and the mixture reads a score in
-      ``(0, 1)``.
+    * What the mixture reads is the engine's ``p_int``, not a setting here. At
+      ``1.0`` the concepts are teacher-forced on the ground-truth labels: that
+      grounds the concept channel, but an intervention then *selects* a state
+      rather than forming the convex combination of Section 3.1, and the
+      unselected state embedding never sees reconstruction gradient. At ``0.0``
+      the concepts are sampled through the relaxation (Gumbel-Softmax, endorsed
+      by Appendix A of the paper, with the engine's temperature schedule
+      controlling it) and the mixture reads a score in ``(0, 1)``, as the
+      reference does. **Between** the two is CEM's RandInt, which is what makes
+      the model steerable: the decoder is trained on concept values it did not
+      itself predict, exactly what an intervention hands it. Set it on the train
+      engine and leave evaluation at ``0.0``.
 
     Examples
     --------
@@ -234,7 +223,6 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
         global_scale: bool = True,
         scale_init: float = 1.0,
         scale_learnable: bool = True,
-        soft_mixing: bool = False,
         inference: Optional[BaseInference] = VariationalInference,
         inference_kwargs: Optional[dict] = None,
         train_inference: Optional[BaseInference] = None,
@@ -266,7 +254,6 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
         self.global_scale = global_scale
         self.scale_init = scale_init
         self.scale_learnable = scale_learnable
-        self.soft_mixing = soft_mixing
         self.encoder = encoder if encoder is not None else nn.Identity()
         self.decoder = decoder if decoder is not None else nn.Identity()
 
@@ -302,7 +289,7 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
     # ------------------------------------------------------------------
 
     def default_query(self, c):
-        """Query **every** variable, with the concepts teacher-forced.
+        """Query **every** variable, supplying the concepts' ground truth.
 
         Overrides the base learner's concept-only query
         (:meth:`~torch_concepts.nn.modules.high.base.learner.BaseLearner.default_query`).
@@ -312,15 +299,17 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
         ``input`` for the reconstruction and ``mixing``/``unknown`` for the
         orthogonality penalty.
 
-        Under ``soft_mixing`` the concepts are left unobserved so the engine
-        samples them from their own relaxed posteriors: the mixture then reads a
-        score in ``(0, 1)`` rather than a hard label, which is what lets *both*
-        of a concept's state embeddings receive reconstruction gradient. Their
-        supervision is unaffected — the concept loss scores the reported
-        ``probs`` against the ground truth either way.
+        The ground truth is always supplied; how often it is actually used is the
+        engine's ``p_int``. Always supplying it is what gives RandInt a target to
+        force *to* — a query that dropped the concepts could only ever sample
+        them. Their supervision is unaffected either way: the concept loss scores
+        the reported ``probs``, which are the CPD's predictions no matter which
+        value propagates.
         """
-        forced = {} if self.soft_mixing else self.fully_observed_query(c)
-        return {**{name: None for name in self.pgm.variables}, **forced}
+        return {
+            **{name: None for name in self.pgm.variables},
+            **self.fully_observed_query(c),
+        }
 
     # ------------------------------------------------------------------
     # Model assembly

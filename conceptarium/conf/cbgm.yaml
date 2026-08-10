@@ -46,10 +46,12 @@ hydra:
   sweeper:
     params:
       dataset: colormnist, celeba
-      alpha: 50, 100, 400
-      # Brackets the reference's effective weight (~0.31, see `kl` below) as
-      # well as the value the earlier sweep assumed.
-      kl: 0.3, 1, 3, 10
+      alpha: 50, 100
+      kl: 5
+      p_int: 1
+      model.model_cls.use_unknown: false 
+      model.model_cls.latent_size: 32
+      model.model_cls.embedding_size: 8, 16
 
 seed: 42
 
@@ -77,8 +79,8 @@ recon: 1.0    # -log p(input | bottleneck)
 # channel, so 1568 of those dims are identically zero and most of the rest are
 # background. The true ratio is milder than the arithmetic suggests.
 kl: 10.0      # KL( q(z|input) || p(z) )
-# Not the reference's 5.0. Under `soft_mixing` the concepts are not teacher-forced,
-# so a concept is only predictable if q(z|x) encoded it -- and it is RECONSTRUCTION
+# Not the reference's 5.0. At a low `p_int` the concepts are mostly not
+# teacher-forced, so a concept is only predictable if q(z|x) encoded it -- and it is RECONSTRUCTION
 # that decides what z encodes. That term sums over D pixels and carries the same
 # 1/sigma^2 factor, so at alpha=5 it outweighs concept supervision 81:1 on the
 # encoder (measured at init, D=2352, sigma=0.3).
@@ -90,6 +92,19 @@ kl: 10.0      # KL( q(z|input) || p(z) )
 # Equalising the two gradients at init needs ~400; the sweep above brackets that.
 alpha: 100.0  # concept supervision  (reference ALPHA)
 beta: 1.0     # orthogonality        (reference BETA)
+
+# CEM's RandInt: the per-sample, per-concept probability that the bottleneck
+# mixes by the GROUND-TRUTH label instead of the model's own predicted score.
+# Applied to the train engine only (conf/model/cbgm.yaml); eval stays at 0.0.
+#
+# This is the steerability knob. At 0.0 the decoder only ever sees scores it
+# produced itself, so an intervention hands it an input distribution it was
+# never trained on. At 1.0 the unselected state embedding gets EXACTLY zero
+# reconstruction gradient, which is worse. In between, both are covered.
+#
+# conf/sweep.yaml runs the discriminative models at 0.8; start lower here,
+# because CBGM also needs the unforced rows to train w-.
+p_int: 0.25
 
 loss:
   weights:   # block style: `[${recon}, ...]` is a YAML flow-sequence parse error

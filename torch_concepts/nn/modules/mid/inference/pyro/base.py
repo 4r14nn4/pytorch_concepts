@@ -26,7 +26,7 @@ import torch.distributions as td
 from ...graph.bayesian_network import BayesianNetwork
 from ...variable import Delta
 from ..base import BaseInference
-from ..utils import build_distribution, reshape_value_to_event
+from ..utils import build_distribution, reshape_value_to_event, teacher_force
 from .utils import dist_to_params, trace_to_params
 
 
@@ -141,6 +141,7 @@ class PyroBaseInference(BaseInference):
         batch_size: Optional[int] = None,
         layer_kwargs: Dict[str, Dict] = {},
         member_evidence: Dict[str, Dict[str, torch.Tensor]] = {},
+        teacher_forced: Dict[str, torch.Tensor] = {},
     ) -> Dict[str, torch.Tensor]:
         """Pyro stochastic function for the generative model.
 
@@ -157,6 +158,13 @@ class PyroBaseInference(BaseInference):
         with Pyro's param store via ``pyro.module`` on every call so SVI updates
         flow back into the original PGM's ``nn.Parameter`` tensors (no parameter
         duplication).
+
+        ``teacher_forced`` carries the ground truth for variables that are to be
+        forced *stochastically* at rate ``self.p_int`` (RandInt). Such a variable
+        is a **latent** site — there is nothing to pass as ``obs=`` when only
+        some rows will take the ground truth — and the blend happens after the
+        draw. The caller supplies it only when ``p_int < 1``, so at the default
+        rate every site keeps the plain ``obs=`` path.
         """
         pyro, _, _ = _import_pyro()
         pgm = self.pgm
@@ -185,7 +193,11 @@ class PyroBaseInference(BaseInference):
                         # ChainMap avoids an O(#variables) dict copy per site.
                         params = cpd(parent_values=ChainMap(cache, data), **layer_kwargs.get(var.name, {}))
 
-                    obs = data.get(var.name, None)
+                    # A stochastically-forced variable must be *sampled* — only
+                    # some rows will take the ground truth — so it never becomes
+                    # an `obs=` site, whatever `data` holds for it.
+                    gt = teacher_forced.get(var.name, None)
+                    obs = None if gt is not None else data.get(var.name, None)
                     if obs is not None:
                         # The distribution's event is the flat size axis, so match
                         # the observation to it: (*batch, *shape) -> (*batch, size).
@@ -196,6 +208,13 @@ class PyroBaseInference(BaseInference):
                         else self._pyro_relaxed_distribution(var, params, temperature)
                     )
                     sample = pyro.sample(var.name, d, obs=obs)
+                    if gt is not None:
+                        # Both are flat (*batch, size) here; blend before the
+                        # event reshape below.
+                        sample = teacher_force(
+                            sample, gt.reshape(gt.shape[0], var.size),
+                            self.p_int, 1, var.name,
+                        )
                     # Cache the realization in the variable's event shape; downstream
                     # CPD aggregation re-flattens it as needed. Partial-plate evidence
                     # is forced onto the observed members here.

@@ -289,7 +289,7 @@ class TestNormalObservation:
         loss = ReconstructionLoss(variable="input")(out)
         assert torch.isfinite(loss)
 
-    def test_generation_through_ancestral_hard_sampling(self, binary_annotations):
+    def test_generation_through_ancestral_sampling(self, binary_annotations):
         """The scale head's ``(B, size)`` output must survive an *unconditioned*
         decode of a multi-dimensional observation — the exact path
         ``run_generative_analysis.py`` uses to produce ``overview.png`` and the
@@ -341,18 +341,20 @@ class TestContinuousConcepts:
             assert sum(p.numel() for p in cpd.parametrization[head].parameters()) > 0
 
 
-class TestSoftMixing:
-    """``soft_mixing`` samples the concepts instead of teacher-forcing them.
+class TestTeacherForcingRate:
+    """``p_int`` is what the bottleneck mixes by.
 
-    Under a hard 0/1 mixing score the unselected state embedding receives
-    *exactly* zero reconstruction gradient — it is trained only by the concept
-    head, so an intervention that selects it hands the decoder an input it never
-    learned to decode. That is what makes a hard-mixed model unsteerable, and
-    what these tests pin.
+    At ``1.0`` the mixing score is a hard 0/1 label, and the unselected state
+    embedding receives *exactly* zero reconstruction gradient — it is trained
+    only by the concept head, so an intervention that selects it hands the
+    decoder an input it never learned to decode. That is what makes a
+    teacher-forced model unsteerable. At ``0.0`` the concepts are sampled and
+    both states are trained; between the two is RandInt.
     """
 
-    def _model(self, annotations, soft_mixing):
+    def _model(self, annotations, p_int):
         n_contexts = len(annotations.labels) + 1
+        engine = {"p_int": p_int}
         return ConceptBottleneckGenerativeModel(
             input_size=INPUT_SIZE,
             annotations=annotations,
@@ -363,7 +365,8 @@ class TestSoftMixing:
             observation=Normal,
             scale_init=0.3,
             scale_learnable=False,
-            soft_mixing=soft_mixing,
+            inference_kwargs=dict(engine),
+            train_inference_kwargs=dict(engine),
             plate=False,
         )
 
@@ -372,11 +375,11 @@ class TestSoftMixing:
         parametrization = model.pgm.factors[name].parametrization["value"]
         return next(p for _, p in parametrization.named_parameters() if p.dim() == 2)
 
-    def _reconstruction_grads(self, soft_mixing):
+    def _reconstruction_grads(self, p_int):
         """(‖grad w+‖, ‖grad w-‖) from reconstruction alone, all labels positive."""
         annotations = Annotations(labels=["a"], cardinalities=[1], types=["binary"])
         torch.manual_seed(0)
-        model = self._model(annotations, soft_mixing=soft_mixing)
+        model = self._model(annotations, p_int=p_int)
         weight = self._state_embedding_weight(model)
 
         x = torch.rand(8, INPUT_SIZE)
@@ -389,41 +392,42 @@ class TestSoftMixing:
         rows = weight.shape[0] // 2
         return weight.grad[:rows].norm(), weight.grad[rows:].norm()
 
-    def test_hard_mixing_starves_the_unselected_state(self):
-        positive, negative = self._reconstruction_grads(soft_mixing=False)
+    def test_full_forcing_starves_the_unselected_state(self):
+        positive, negative = self._reconstruction_grads(p_int=1.0)
         assert positive > 0
         assert negative == 0.0
 
-    def test_soft_mixing_trains_both_states(self):
-        positive, negative = self._reconstruction_grads(soft_mixing=True)
+    def test_no_forcing_trains_both_states(self):
+        positive, negative = self._reconstruction_grads(p_int=0.0)
         assert positive > 0
         assert negative > 0
 
-    def test_soft_mixing_leaves_the_concepts_unforced(self):
+    def test_randint_trains_both_states(self):
+        """The point of the whole exercise: a rate in between still reaches w-.
+
+        A batch under RandInt holds both forced and unforced rows, so the
+        unselected embedding is trained by the unforced ones while the forced
+        ones keep teaching the decoder to handle a label it did not predict.
+        """
+        positive, negative = self._reconstruction_grads(p_int=0.5)
+        assert positive > 0
+        assert negative > 0
+
+    def test_the_ground_truth_is_always_in_the_query(self):
+        """RandInt needs a target to force *to*, at every rate."""
         annotations = Annotations(labels=["a"], cardinalities=[1], types=["binary"])
         ground_truth = torch.ones(4, 1)
-        assert self._model(annotations, True).default_query(ground_truth)["a"] is None
-        forced = self._model(annotations, False).default_query(ground_truth)["a"]
-        assert torch.equal(forced, ground_truth)
-
-    def test_soft_mixing_does_not_configure_the_engine(self):
-        """`soft_mixing` controls the query only.
-
-        Whether a discrete draw is soft or hard follows from the concept's
-        declared family, so no engine carries a switch for it.
-        """
-        annotations = Annotations(labels=["a"], cardinalities=[1], types=["binary"])
-        for soft_mixing in (True, False):
-            engine = self._model(annotations, soft_mixing).train_inference
-            assert not hasattr(engine, "hard")
+        for p_int in (0.0, 0.5, 1.0):
+            forced = self._model(annotations, p_int).default_query(ground_truth)["a"]
+            assert torch.equal(forced, ground_truth)
 
     def test_fixed_scale_head_has_no_parameters(self):
         annotations = Annotations(labels=["a"], cardinalities=[1], types=["binary"])
-        head = self._model(annotations, True).pgm.factors["input"].parametrization["scale"]
+        head = self._model(annotations, 0.0).pgm.factors["input"].parametrization["scale"]
         assert sum(p.numel() for p in head.parameters()) == 0
 
-    @pytest.mark.parametrize("soft_mixing", [False, True])
-    def test_concepts_still_report_probs(self, soft_mixing):
+    @pytest.mark.parametrize("p_int", [1.0, 0.5, 0.0])
+    def test_concepts_still_report_probs(self, p_int):
         """Soft draws must not cost the concepts their reported ``probs``.
 
         A soft engine builds the plain relaxed families rather than their
@@ -435,7 +439,7 @@ class TestSoftMixing:
         annotations = Annotations(
             labels=["a", "d"], cardinalities=[1, 4], types=["binary", "categorical"]
         )
-        model = self._model(annotations, soft_mixing=soft_mixing)
+        model = self._model(annotations, p_int=p_int)
         ground_truth = torch.tensor([[1.0, 2.0]]).expand(4, -1)
         out = model(
             query=model.default_query(ground_truth), input=torch.rand(4, INPUT_SIZE)
@@ -467,10 +471,13 @@ class TestTemperatureAnnealing:
 
     def _model(self, annotations, schedule=True):
         n_contexts = len(annotations.labels) + 1
+        engine = {"p_int": 0.0}
         kwargs = (
-            {"inference_kwargs": dict(self.SCHEDULE),
-             "train_inference_kwargs": dict(self.SCHEDULE)}
-            if schedule else {}
+            {"inference_kwargs": {**engine, **self.SCHEDULE},
+             "train_inference_kwargs": {**engine, **self.SCHEDULE}}
+            if schedule
+            else {"inference_kwargs": dict(engine),
+                  "train_inference_kwargs": dict(engine)}
         )
         return ConceptBottleneckGenerativeModel(
             input_size=INPUT_SIZE,
@@ -482,7 +489,6 @@ class TestTemperatureAnnealing:
             observation=Normal,
             scale_init=0.3,
             scale_learnable=False,
-            soft_mixing=True,
             plate=False,
             lightning=True,  # the temperature hook is a LightningModule hook
             **kwargs,

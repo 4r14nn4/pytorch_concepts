@@ -488,28 +488,29 @@ def analyse_job(cfg: DictConfig, job_dir: Path, device: torch.device) -> List[Di
     # Decoding engine: ancestral sampling resolves every root through its own
     # prior, so an unconditioned query really does draw z ~ p(z).
     #
-    # `hard` must match how the model was TRAINED: the bottleneck mixes state
-    # embeddings by the concept score, so decoding a hard assignment when
-    # training only ever saw soft blends (or vice versa) is out of distribution.
-    # Under `soft_mixing` the training engine samples soft, so this does too.
-    hard = cfg.get("hard_sampling")
-    if hard is None:
-        hard = not getattr(model, "soft_mixing", False)
-    # ...and so must the temperature: the relaxation is annealed during
-    # training, so decoding at the default 1.0 would sample far softer codes
-    # than the trained decoder ever saw. The checkpoint restores the training
-    # engine's temperature buffer, so this reads the value training ended on.
+    # Soft vs hard discrete draws needs no setting here: it follows from the
+    # concepts' declared family, which this PGM already carries from training.
+    # Decoding a hard assignment when training only ever saw soft blends (or vice
+    # versa) would be out of distribution, and reusing the model's own graph is
+    # what makes that impossible to get wrong.
+    #
+    # `p_int` is inert: generation supplies no ground truth in the query, and the
+    # steering figures replay their draws as *evidence*.
+    #
+    # The temperature does have to be carried over: the relaxation is annealed
+    # during training, so decoding at the default 1.0 would sample far softer
+    # codes than the trained decoder ever saw. The checkpoint restores the
+    # training engine's temperature buffer, so this reads what training ended on.
     temperature = float(model.train_inference.temperature)
     engine = AncestralSamplingInference(
-        model.pgm, p_int=1.0, hard=bool(hard),
+        model.pgm, p_int=1.0,
         initial_temperature=temperature, annealing="constant",
     )
     logger.info(
-        "decoding with %s discrete samples at temperature %.4f "
-        "(model.soft_mixing=%s, train engine hard=%s)",
-        "hard" if hard else "soft", temperature,
-        getattr(model, "soft_mixing", None),
-        getattr(model.train_inference, "hard", None),
+        "decoding at temperature %.4f; discrete families: %s",
+        temperature,
+        {v.name: v.distribution.__name__
+         for v in model.pgm.variables.values() if v.variable_type == "concept"},
     )
 
     out_dir = Path(job_dir)

@@ -54,6 +54,12 @@ class VariationalInference(PyroBaseInference):
     initial_temperature, annealing, annealing_rate
         Temperature schedule for the relaxed-discrete sites; see
         :func:`~torch_concepts.nn.modules.mid.inference.base.make_temperature_schedule`.
+    p_int : float, default 1.0
+        Teacher-forcing rate for query variables that carry a target; see
+        :class:`~torch_concepts.nn.modules.mid.inference.base.BaseInference`.
+        Below ``1.0`` those variables become latent sites blended with the
+        ground truth after the draw, which is how a generative concept model
+        gets CEM's RandInt. Set it on the *train* engine only.
     """
 
     name = "VariationalInference"
@@ -68,6 +74,7 @@ class VariationalInference(PyroBaseInference):
         annealing: Union[str, Callable[[int], float]] = "constant",
         annealing_rate: float = 0.0,
         final_temperature: float = 1e-6,
+        p_int: float = 1.0,
     ):
         super().__init__(
             pgm,
@@ -75,6 +82,7 @@ class VariationalInference(PyroBaseInference):
             annealing=annealing,
             annealing_rate=annealing_rate,
             final_temperature=final_temperature,
+            p_int=p_int,
         )
         self._require_directed()
 
@@ -123,6 +131,7 @@ class VariationalInference(PyroBaseInference):
             annealing=self.annealing,
             annealing_rate=self.annealing_rate,
             final_temperature=self.final_temperature,
+            p_int=self.p_int,
         )
 
     # ------------------------------------------------------------------
@@ -303,17 +312,27 @@ class VariationalInference(PyroBaseInference):
         temperature = self.temperature
         latent_names = self._latent_names
 
+        # Teacher forcing below full strength (RandInt): the *query* carries the
+        # targets, matching ``ForwardInference``'s convention. Empty at the
+        # default ``p_int=1.0``, so those sites keep the plain ``obs=`` path and
+        # nothing changes for callers that never set the rate. ``data`` keeps its
+        # entries either way, so the guide conditions on exactly what it did.
+        teacher_forced = (
+            {n: v for n, v in query.items() if v is not None}
+            if self.p_int < 1.0 else {}
+        )
+
         if self.pgm.has_guides:
             guide_fn = lambda: self.guide_fn(data, temperature, latent_names, layer_kwargs, member_evidence)
             guide_tr = poutine.trace(guide_fn).get_trace()
-            model_fn = lambda: self.model_fn(data, temperature, latent_names, layer_kwargs=layer_kwargs, member_evidence=member_evidence)
+            model_fn = lambda: self.model_fn(data, temperature, latent_names, layer_kwargs=layer_kwargs, member_evidence=member_evidence, teacher_forced=teacher_forced)
             replayed = poutine.replay(model_fn, trace=guide_tr)
             model_tr = poutine.trace(replayed).get_trace()
             guide_params = self._align_param_keys(
                 trace_to_params(guide_tr), use_guides=True
             )
         else:
-            model_fn = lambda: self.model_fn(data, temperature, latent_names, layer_kwargs=layer_kwargs, member_evidence=member_evidence)
+            model_fn = lambda: self.model_fn(data, temperature, latent_names, layer_kwargs=layer_kwargs, member_evidence=member_evidence, teacher_forced=teacher_forced)
             model_tr = poutine.trace(model_fn).get_trace()
             guide_params = {}
 

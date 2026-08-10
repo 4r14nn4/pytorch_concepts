@@ -69,20 +69,10 @@ model_cls:
   scale_init: 0.3
   scale_learnable: false
 
-  # Sample the concepts instead of teacher-forcing them, so the bottleneck mixes
-  # by a score in (0, 1). Under a hard 0/1 score the unselected state embedding
-  # receives EXACTLY zero reconstruction gradient, so an intervention that
-  # selects it feeds the decoder an input it was never trained on — which is why
-  # a hard-mixed model does not steer.
-  #
-  # This decides the QUERY only. Whether the engine's draws are themselves soft
-  # follows from `variable_distributions` below.
-  soft_mixing: true
-
   # Base families, restoring CBGM's own class defaults over the relaxed ones
   # `_commons` sets for the discriminative models. These plain families give
-  # SOFT Concrete draws, which is what `soft_mixing` above needs: gradient
-  # reaches every state of every concept. Swap in
+  # SOFT Concrete draws, so gradient reaches every state of every concept when
+  # the mixture reads a sampled score (see `p_int` on the engines below). Swap in
   # `pyro.distributions.RelaxedBernoulliStraightThrough` /
   # `RelaxedOneHotCategoricalStraightThrough` for hard (exact bit / one-hot)
   # draws with a straight-through gradient instead — that choice is the ONLY
@@ -107,12 +97,29 @@ model_cls:
   # draws z from the prior instead) is swapped in by the analysis script.
   #
   # The relaxation is annealed: soft early, so gradient reaches every state of
-  # every concept (the whole point of `soft_mixing`), then sharpened so training
-  # ENDS on near-discrete codes and the bottleneck actually commits to a state.
+  # every concept, then sharpened so training ENDS on near-discrete codes and the
+  # bottleneck actually commits to a state.
   # 1.0 -> 0.1 in ~2.3k optimiser steps at rate 1e-3; at 0.1 a Concrete draw
   # puts ~94% of its mass on one state (measured for binary, 4-way and 10-way).
   # The eval engine shares the training temperature buffer, so evaluation and
   # the analysis script decode at whatever value training finished on.
+  #
+  # `p_int` is what the bottleneck mixes by -- CEM's RandInt, and the reason the
+  # two engines differ:
+  #
+  #   0.0  mix by the model's own sampled score. Both of a concept's state
+  #        embeddings get reconstruction gradient, but the decoder only ever
+  #        sees scores IT produced.
+  #   1.0  mix by the ground-truth label. Grounds the concept channel, but the
+  #        unselected state embedding gets EXACTLY zero reconstruction gradient,
+  #        so an intervention selecting it feeds the decoder an untrained input
+  #        -- which is why a fully teacher-forced model does not steer.
+  #   0<p<1  per-sample, per-concept coin flip between the two. The decoder is
+  #        trained on concept values it did not itself predict, which is exactly
+  #        what an intervention hands it. This is the steerability knob; sweep it
+  #        from conf/cbgm.yaml.
+  #
+  # Eval stays at 0.0 so metrics measure the model unaided.
   inference:
     _target_: "torch_concepts.nn.VariationalInference"
     _partial_: true
@@ -120,7 +127,15 @@ model_cls:
     annealing: exponential
     annealing_rate: 0.001
     final_temperature: 0.1
-  train_inference: ${model.model_cls.inference}
+    p_int: 0.0
+  train_inference:
+    _target_: "torch_concepts.nn.VariationalInference"
+    _partial_: true
+    initial_temperature: ${model.model_cls.inference.initial_temperature}
+    annealing: ${model.model_cls.inference.annealing}
+    annealing_rate: ${model.model_cls.inference.annealing_rate}
+    final_temperature: ${model.model_cls.inference.final_temperature}
+    p_int: ${p_int}
 
   # Bottleneck (k concept contexts + 1 unsupervised) -> pixels, through
   # transposed convolutions rather than a dense head: a flat decoder to

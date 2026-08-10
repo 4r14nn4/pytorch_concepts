@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from abc import ABC, abstractmethod
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
@@ -10,90 +9,9 @@ import torch
 
 from ...graph.bayesian_network import BayesianNetwork
 from ...variable import Variable
-from ..utils import reshape_value_to_event
+from ..utils import reshape_value_to_event, teacher_force
 from ....outputs import InferenceOutput
 from .base import TorchBaseInference
-
-
-def _align_gt(
-    gt: torch.Tensor, ref: torch.Tensor, name: Optional[str] = None
-) -> torch.Tensor:
-    """Cast and reshape ground-truth tensor to match the dtype and shape of ref.
-
-    Step-by-step:
-    1. Cast ``gt`` to ``ref``\'s dtype so arithmetic ops don\'t raise type errors
-       (e.g. LongTensor label vs FloatTensor network output).
-    2. If shapes already match after the cast, return immediately.
-    3. Handle the common "extra trailing 1" mismatches that arise when some
-       code paths squeeze scalars and others don\'t:
-       - ``gt`` has one more dim than ``ref`` and its last dim is 1 → squeeze it off.
-       - ``gt`` has one fewer dim than ``ref`` and ``ref``\'s last dim is 1 → unsqueeze.
-    4. Finally, broadcast ``gt`` to exactly ``ref``\'s shape so downstream ops
-       (e.g. per-element masking) can use ``gt`` in place of ``ref``.
-
-    Step 4 also silently rescues genuinely wrong targets — e.g. a ``(B,)`` label
-    stretched across a ``(B, k)`` output — so a broadcast that is not one of the
-    trailing-1 cases warns once per (name, shape) pair.
-    """
-    aligned = gt.to(ref.dtype) if gt.dtype != ref.dtype else gt
-    if aligned.shape == ref.shape:
-        return aligned
-
-    original_shape = tuple(aligned.shape)
-    if aligned.dim() == ref.dim() + 1 and aligned.shape[-1] == 1:
-        aligned = aligned.squeeze(-1)
-    elif aligned.dim() + 1 == ref.dim() and ref.shape[-1] == 1:
-        aligned = aligned.unsqueeze(-1)
-    if aligned.shape == ref.shape:
-        return aligned
-
-    _warn_broadcast(name, original_shape, tuple(ref.shape))
-    return aligned.expand_as(ref)
-
-
-# (name, target shape, reference shape) triples already warned about, so a
-# training loop reports a suspicious target once rather than every step.
-_BROADCAST_WARNED: set = set()
-
-
-def _warn_broadcast(name: Optional[str], gt_shape: tuple, ref_shape: tuple) -> None:
-    key = (name, gt_shape, ref_shape)
-    if key in _BROADCAST_WARNED:
-        return
-    _BROADCAST_WARNED.add(key)
-    target = f"for {name!r}" if name else "for a query variable"
-    warnings.warn(
-        f"Teacher forcing {target}: the target of shape {gt_shape} does not match "
-        f"the predicted shape {ref_shape} and is being broadcast to fit. This is "
-        "usually a mis-shaped label (e.g. class indices where a one-hot or "
-        "per-element target is expected); pass a target of shape "
-        f"{ref_shape} to silence this.",
-        UserWarning,
-        stacklevel=3,
-    )
-
-
-def _teacher_force(
-    nn_value: torch.Tensor,
-    gt: torch.Tensor,
-    p_int: float,
-    n_leading: int,
-    name: Optional[str] = None,
-) -> torch.Tensor:
-    """Stochastically replace nn_value with ground truth at rate p_int.
-
-    The draw is per leading (batch-like) element: ``n_leading`` says how many of
-    ``nn_value``'s dimensions are leading, so a variable is forced or not as a
-    whole, whatever its event shape and however many batch axes there are.
-    """
-    aligned = _align_gt(gt, nn_value, name)
-    if p_int >= 1.0:
-        return aligned
-    if p_int <= 0.0:
-        return nn_value
-    mask_shape = nn_value.shape[:n_leading] + (1,) * (nn_value.dim() - n_leading)
-    mask = (torch.rand(mask_shape, device=nn_value.device) < p_int).to(nn_value.dtype)
-    return mask * aligned + (1.0 - mask) * nn_value
 
 
 class ForwardInference(TorchBaseInference, ABC):
@@ -125,12 +43,11 @@ class ForwardInference(TorchBaseInference, ABC):
         The model to query. Must be directed: the pass walks ``pgm.levels`` in
         topological order, which only a ``BayesianNetwork`` provides.
     p_int : float, optional
-        Teacher-forcing probability in ``[0, 1]``: the per-sample chance of
-        propagating a query variable's ground-truth target instead of the
-        model's own prediction. ``1.0`` recovers sequential/independent CBM
-        training, ``0.0`` joint training, and an intermediate value the
-        CEM-style random-intervention regime. Only applies to query entries
-        that carry a target tensor.
+        Teacher-forcing probability in ``[0, 1]``; see
+        :class:`~torch_concepts.nn.modules.mid.inference.base.BaseInference`.
+        ``1.0`` recovers sequential/independent CBM training, ``0.0`` joint
+        training, and an intermediate value the CEM-style random-intervention
+        (RandInt) regime. Only applies to query entries that carry a target.
     initial_temperature : float, optional
         Starting temperature of the relaxed-discrete distributions. Ignored by
         the deterministic engines, which never sample.
@@ -180,11 +97,9 @@ class ForwardInference(TorchBaseInference, ABC):
             annealing=annealing,
             annealing_rate=annealing_rate,
             final_temperature=final_temperature,
+            p_int=p_int,
         )
         self._require_directed()
-        if not 0.0 <= float(p_int) <= 1.0:
-            raise ValueError(f"p_int must be in [0, 1], got {p_int!r}.")
-        self.p_int = float(p_int)
         # When True (deterministic engines only), the propagated parameter is
         # passed through its default activation before being fed to child CPDs.
         # The parameters reported in the inference output stay the raw
@@ -304,7 +219,7 @@ class ForwardInference(TorchBaseInference, ABC):
         value = self._propagate(variable, params, temperature)
         target = query.get(name)
         if target is not None:
-            value = _teacher_force(value, target, self.p_int, len(leading), name)
+            value = teacher_force(value, target, self.p_int, len(leading), name)
         # Partial-plate observation: splice the observed members over the computed
         # value (the CPD owns the column write). ``member_evidence`` is {} unless
         # this variable has individually-observed members.

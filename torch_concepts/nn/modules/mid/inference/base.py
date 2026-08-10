@@ -45,6 +45,24 @@ class BaseInference(nn.Module):
         not of a backend, and a training loop should be able to advance it
         without knowing which engine it holds (see :meth:`temperature_step`).
         Engines that never sample keep it and never read it.
+    p_int : float, default 1.0
+        Teacher-forcing rate, applied to any variable the **query** supplies a
+        value for: each leading (batch-like) element independently takes the
+        ground truth with probability ``p_int`` and the engine's own realisation
+        otherwise (see
+        :func:`~torch_concepts.nn.modules.mid.inference.utils.teacher_force`).
+        ``1.0`` always forces, ``0.0`` never does, and a value in between is
+        CEM's **RandInt**: it trains a downstream consumer — a concept
+        bottleneck's mixture, say — to cope with concept values the model did
+        not itself predict, which is what an intervention feeds it.
+
+        Here rather than per-backend for the same reason as the temperature: it
+        is a property of the run. Set it on the *train* engine only, leaving
+        evaluation at ``0.0`` so metrics measure the model unaided.
+
+        The draw is per variable, so granularity follows the graph's layout: with
+        one variable per concept (``plate=False``) it is per-sample per-concept,
+        which is RandInt proper; a plate is forced or not as a whole.
 
     Warns
     -----
@@ -52,7 +70,7 @@ class BaseInference(nn.Module):
         If any root factor's parametrization requires input arguments; such a
         root must be supplied as constant evidence on every ``query`` call.
     """
-    
+
     name: str = "BaseInference"
 
     def __init__(
@@ -62,11 +80,16 @@ class BaseInference(nn.Module):
         annealing: Union[str, Callable[[int], float]] = "constant",
         annealing_rate: float = 0.0,
         final_temperature: float = 1e-6,
+        p_int: float = 1.0,
     ):
         super().__init__()
         # NOTE: nn.Module.__setattr__ auto-registers ``pgm`` as a submodule, so
         # the engine shares parameters with the original PGM (no copy).
         self.pgm = pgm
+
+        if not 0.0 <= float(p_int) <= 1.0:
+            raise ValueError(f"p_int must be in [0, 1], got {p_int!r}.")
+        self.p_int = float(p_int)
 
         # Retained for repr/introspection; the live schedule lives in ``_schedule``.
         self.initial_temperature = float(initial_temperature)
