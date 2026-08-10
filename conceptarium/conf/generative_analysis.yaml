@@ -93,14 +93,31 @@ n_fid_samples: 2048
 
 # Prior draws the steerability metric starts from (the paper keeps 1000 that do
 # not already show the concept, so this is an upper bound on that).
+#
+# NOTE: steerability is defined for BINARY concepts only -- "turn the concept on"
+# has no single meaning for a k-way categorical one. Non-binary concepts are
+# skipped with a warning, and a model with no binary concepts reports nan.
 n_steering_samples: 1000
 
 # The external judge: a classifier trained on REAL data, which decides whether a
 # generated sample shows a concept. The paper requires >=98% test accuracy before
 # the steerability number means anything; `classifier_accuracy` is reported in
-# results.csv so you can check. Raise `classifier_epochs` if it falls short.
+# results.csv so you can check.
+#
+# `classifier_width` is the first conv stage; the net doubles it twice, so 16
+# means 16/32/64 channels -- a few tens of thousands of parameters. It only has
+# to answer "is this binary concept present", and it shares the GPU with the
+# generative model, so it is kept deliberately small. Raise it (or
+# `classifier_epochs`) if the accuracy falls short.
 classifier_epochs: 5
 classifier_lr: 1e-3
+classifier_width: 16
+
+# Rows per generative/classifier pass. Caps peak memory WITHOUT changing any
+# result: generation, decoding and classification are all chunked at this size
+# and concatenated, so `n_fid_samples` / `n_steering_samples` still decide how
+# many samples are scored. Lower it if the analysis runs out of memory.
+eval_batch_size: 128
 
 # Cap the test-set passes (reconstruction_nll, concept_accuracy, and the judge's
 # scoring) at this many batches; null scores the whole split.

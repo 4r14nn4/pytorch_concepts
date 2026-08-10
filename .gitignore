@@ -93,3 +93,4 @@ outputs/
 conceptarium/visualize.py
 conceptarium/run_analysis.py
 conceptarium/conf/benchmark.yaml
+results/

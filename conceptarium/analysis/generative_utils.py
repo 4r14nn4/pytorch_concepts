@@ -15,8 +15,9 @@ Four independent pieces, in the order the script uses them:
 
 The split that makes this extensible is between the *shape* of a metric and the
 *modality* it is measured in. FID, for instance, is a Fréchet distance between
-feature vectors; only :meth:`Modality.features` knows those come from an
-Inception network for images and would come from a language model for text.
+feature vectors — computed by ``torchmetrics`` — and only
+:meth:`Modality.features` knows those come from an Inception network for images
+and would come from a language model for text.
 """
 
 from __future__ import annotations
@@ -210,8 +211,12 @@ class Modality(ABC):
         """``(N, prod(shape)) -> (N, D)`` features for a distributional distance."""
 
     @abstractmethod
-    def build_classifier(self, n_outputs: int) -> nn.Module:
-        """A ``(N, prod(shape)) -> (N, n_outputs)`` concept classifier, untrained."""
+    def build_classifier(self, n_outputs: int, width: int) -> nn.Module:
+        """A ``(N, prod(shape)) -> (N, n_outputs)`` concept classifier, untrained.
+
+        ``width`` is the narrowest layer; the judge only has to separate binary
+        concepts, so it can stay far smaller than the model under test.
+        """
 
 
 class ImageModality(Modality):
@@ -248,16 +253,29 @@ class ImageModality(Modality):
         std = torch.tensor([0.229, 0.224, 0.225], device=images.device).view(1, 3, 1, 1)
         return self._extractor(images.device)((images - mean) / std)
 
-    def build_classifier(self, n_outputs: int) -> nn.Module:
-        """A small conv net — enough to hit the paper's 98% bar on these datasets."""
-        channels, height, width = self.shape
+    def build_classifier(self, n_outputs: int, width: int = 16) -> nn.Module:
+        """A small conv net: three stride-2 stages, then global pooling.
+
+        Deliberately tiny. It only has to answer "is this binary concept present",
+        which on these datasets is an easy problem — and it is built alongside a
+        generative model that is already holding the GPU, so a large judge is the
+        thing that runs the analysis out of memory. ``width`` doubles per stage,
+        so the default is 16/32/64 channels: a few tens of thousands of
+        parameters. Raise it if `classifier_accuracy` comes out below the 98% the
+        metric assumes.
+
+        Global average pooling, not a flatten, so the parameter count is
+        independent of the image size — CelebA at 64x64 costs the same as
+        Color-MNIST at 28x28.
+        """
+        channels = self.shape[0]
         return nn.Sequential(
             nn.Unflatten(-1, self.shape),
-            nn.Conv2d(channels, 32, 3, stride=2, padding=1), nn.ReLU(),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1), nn.ReLU(),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(channels, width, 3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(width, 2 * width, 3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(2 * width, 4 * width, 3, stride=2, padding=1), nn.ReLU(),
             nn.AdaptiveAvgPool2d(1), nn.Flatten(),
-            nn.Linear(128, n_outputs),
+            nn.Linear(4 * width, n_outputs),
         )
 
 
@@ -358,27 +376,44 @@ class EvalContext:
         concept — which the interventions replay so only the target concept moves.
         """
         if self._generated is None or self._generated[0].shape[0] < n:
+            # Batched: one query for a few thousand draws holds the decoder's
+            # activations for all of them at once.
+            batches = []
             with torch.no_grad():
-                out = self.engine.query(query=self.query, evidence={}, n_samples=n)
-            drawn = {name: getattr(out.samples[name], "tensor", out.samples[name])
-                     for name in out.samples.annotation.labels}
-            self._generated = (observation_of(self.model, out), drawn)
+                for start in range(0, n, self.batch_size):
+                    out = self.engine.query(
+                        query=self.query, evidence={},
+                        n_samples=min(self.batch_size, n - start),
+                    )
+                    batches.append((
+                        observation_of(self.model, out),
+                        {name: getattr(out.samples[name], "tensor", out.samples[name])
+                         for name in out.samples.annotation.labels},
+                    ))
+            self._generated = (
+                torch.cat([s for s, _ in batches]),
+                {key: torch.cat([d[key] for _, d in batches]) for key in batches[0][1]},
+            )
         samples, drawn = self._generated
         return samples[:n], {k: v[:n] for k, v in drawn.items()}
+
+    @property
+    def batch_size(self) -> int:
+        """Rows per generative pass. Caps peak memory, not the sample count."""
+        return int(self.cfg.get("eval_batch_size", 128))
 
     def decode(self, evidence: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Decode the observation under ``evidence`` (an intervention).
 
-        Chunked: steerability decodes once per state of every concept, so on
-        CelebA (40 concepts, 1000 draws) a single pass would allocate the decoder
-        activations for 80k images at once.
+        Chunked: steerability decodes every candidate sample, so on CelebA a
+        single pass would allocate the decoder activations for the whole draw
+        at once.
         """
-        size = int(self.cfg.get("decode_batch_size", 256))
         n = next(iter(evidence.values())).shape[0]
         chunks = []
         with torch.no_grad():
-            for start in range(0, n, size):
-                piece = {k: v[start:start + size] for k, v in evidence.items()}
+            for start in range(0, n, self.batch_size):
+                piece = {k: v[start:start + self.batch_size] for k, v in evidence.items()}
                 chunks.append(observation_of(
                     self.model, self.engine.query(query=["input"], evidence=piece)
                 ))
@@ -396,6 +431,7 @@ class EvalContext:
                 self.datamodule, self.modality, self.device,
                 epochs=int(self.cfg.get("classifier_epochs", 5)),
                 lr=float(self.cfg.get("classifier_lr", 1e-3)),
+                width=int(self.cfg.get("classifier_width", 16)),
             )
         return self._classifier, self._classifier_accuracy
 
@@ -411,34 +447,34 @@ class Metric(ABC):
         """``{column_name: value}`` — one metric may report several columns."""
 
 
-def frechet_distance(real: torch.Tensor, fake: torch.Tensor) -> float:
-    """Fréchet distance between two sets of feature vectors.
+class _ModalityFeatures(nn.Module):
+    """Adapts :meth:`Modality.features` to the ``nn.Module`` torchmetrics expects.
 
-    ``|mu_r - mu_f|^2 + tr(C_r + C_f - 2 (C_r C_f)^{1/2})``. Written out rather
-    than pulled from a library because the formula is four lines and is what makes
-    the metric modality-agnostic: swap :meth:`Modality.features` and the same
-    distance becomes FID for images or its analogue for anything else.
+    ``FrechetInceptionDistance(feature=<Module>)`` is the documented hook for a
+    custom extractor. Going through it — rather than letting torchmetrics build
+    its own Inception — is what keeps the metric modality-agnostic *and* avoids
+    the ``torch-fidelity`` dependency its integer ``feature`` argument requires.
     """
-    import numpy as np
-    from scipy import linalg
 
-    real, fake = real.double().cpu(), fake.double().cpu()
-    diff = real.mean(0) - fake.mean(0)
-    cov_r, cov_f = torch.cov(real.T), torch.cov(fake.T)
-    # sqrtm of a product of PSD matrices can pick up a tiny imaginary part from
-    # numerical error; the real part is the intended value.
-    covmean = linalg.sqrtm((cov_r @ cov_f).numpy())
-    if np.iscomplexobj(covmean):
-        covmean = covmean.real
-    return float(diff @ diff + torch.trace(cov_r) + torch.trace(cov_f)
-                 - 2 * np.trace(covmean))
+    def __init__(self, modality: Modality) -> None:
+        super().__init__()
+        self.modality = modality
+
+    def forward(self, flat: torch.Tensor) -> torch.Tensor:
+        return self.modality.features(flat)
 
 
 class FID(Metric):
     """Fréchet distance between generated samples and real data (Table 2).
 
-    For images this is FID exactly: :class:`ImageModality` supplies Inception-v3
-    pool3 features. Lower is better.
+    ``|mu_r - mu_f|^2 + tr(C_r + C_f - 2 (C_r C_f)^{1/2})``, computed by
+    :class:`torchmetrics.image.fid.FrechetInceptionDistance` over the features
+    :meth:`Modality.features` supplies. For images those are Inception-v3 pool3
+    activations, so this is FID exactly. Lower is better.
+
+    torchmetrics accumulates sums and covariance sums per ``update``, so the
+    samples are streamed in ``eval_batch_size`` chunks and the full feature matrix
+    is never held at once.
 
     ``n_fid_samples`` sets both sides. The published number uses 40k; the default
     here is far smaller, and FID is biased upward at small sample counts — so
@@ -448,33 +484,50 @@ class FID(Metric):
     name = "fid"
 
     def compute(self, ctx: EvalContext) -> Dict[str, float]:
+        from torchmetrics.image.fid import FrechetInceptionDistance
+
         n = int(ctx.cfg.get("n_fid_samples", 2048))
         generated, _ = ctx.generate(n)
         real = ctx.real_samples(n)
         if min(real.shape[0], generated.shape[0]) < 2:
             return {"fid": float("nan")}
-        return {"fid": frechet_distance(ctx.modality.features(real),
-                                        ctx.modality.features(generated))}
+
+        extractor = _ModalityFeatures(ctx.modality)
+        # Declaring the width skips torchmetrics' probe, which would call the
+        # extractor with a dummy *image* -- our features take a flat sample. One
+        # forward on a single row, which also pins the lazily-built extractor to
+        # the right device before any real data reaches it.
+        extractor.num_features = int(
+            extractor(torch.zeros(1, real.shape[1], device=ctx.device)).shape[-1]
+        )
+        # `normalize` is ignored for a custom extractor (torchmetrics only rescales
+        # to bytes for its own Inception), so the features are used as produced.
+        metric = FrechetInceptionDistance(feature=extractor, normalize=False).to(ctx.device)
+        for source, is_real in ((real, True), (generated, False)):
+            for start in range(0, source.shape[0], ctx.batch_size):
+                metric.update(source[start:start + ctx.batch_size], real=is_real)
+        return {"fid": float(metric.compute())}
 
 
 class Steerability(Metric):
     """Does intervening on a concept put that concept into the output? (Table 1)
 
-    The paper's procedure: generate from the prior, keep the samples an external
-    classifier says do *not* have the concept, intervene to turn it on, and report
-    the fraction the classifier now says do. Reported as a percentage, as in the
-    paper, so the numbers are directly comparable to its Table 1.
+    The paper's procedure, followed exactly: generate from the prior, keep the
+    samples an external classifier says do *not* have the concept, intervene to
+    turn it **on**, and report the fraction the classifier now says do. Reported
+    as a percentage, so the numbers are directly comparable to the paper's
+    Table 1.
 
-    Generalised past the paper's binary concepts: a categorical concept is scored
-    once per state — samples not currently in state ``s``, intervened to ``s`` —
-    and averaged. For a binary concept that averages "turn on" with "turn off",
-    which reduces to the paper's number on the ON state alone.
+    **Binary concepts only.** "Turn the concept on" has no single meaning for a
+    k-way categorical one, so non-binary concepts are skipped with a warning
+    rather than scored under some invented convention. If a model has no binary
+    concepts the metric reports ``nan``.
 
     Every *other* concept is clamped to its own drawn value, so the intervention
-    is the only thing that differs; left free they would be redrawn per state and
-    confound the measurement with fresh sampling noise.
+    is the only thing that differs; left free they would be redrawn and confound
+    the measurement with fresh sampling noise.
 
-    Reports ``steerability`` (the mean over concepts), one
+    Reports ``steerability`` (the mean over binary concepts), one
     ``steerability_<concept>`` column each, and ``classifier_accuracy`` — the
     judge's own test accuracy, which the paper requires to be at least 98%. Treat
     a steerability number sitting under a low classifier accuracy as unreadable.
@@ -483,40 +536,46 @@ class Steerability(Metric):
     name = "steerability"
 
     def compute(self, ctx: EvalContext) -> Dict[str, float]:
-        classifier, accuracy = ctx.classifier()
         annotations = ctx.datamodule.annotations
-        n = int(ctx.cfg.get("n_steering_samples", 1000))
-        generated, drawn = ctx.generate(n)
-        concepts = ctx.concepts
-        predicted = predict_states(classifier, generated, annotations)
+        names = [name for name, _ in binary_concepts(annotations)]
+        skipped = [n for n, kind in zip(annotations.labels, annotations.types)
+                   if kind != "binary"]
+        if skipped:
+            logger.warning(
+                "steerability is defined for binary concepts only; skipping %s",
+                skipped,
+            )
+        if not names:
+            logger.warning("no binary concepts: steerability is not defined here")
+            return {"steerability": float("nan")}
+
+        classifier, accuracy = ctx.classifier()
+        batch = ctx.batch_size
+        generated, drawn = ctx.generate(int(ctx.cfg.get("n_steering_samples", 1000)))
+        predicted = predict_binary(classifier, generated, names, batch)
+        by_name = {v.name: v for v in ctx.concepts}
 
         results: Dict[str, float] = {"classifier_accuracy": accuracy}
         per_concept = []
-        for variable in concepts:
-            if variable.name not in predicted:
-                # The judge scores the data's concepts; a model variable the data
-                # does not annotate (a plate covering several concepts, say) has
-                # nothing to be scored against.
+        for name in names:
+            variable = by_name.get(name)
+            if variable is None:  # annotated in the data, absent from the graph
                 continue
-            states = concept_states(variable, device=ctx.device)
-            rates = []
-            for index, (_, value) in enumerate(states):
-                # The paper's selection step: only samples that do NOT already
-                # show the target state can demonstrate that steering added it.
-                candidates = (predicted[variable.name] != index).nonzero().flatten()
-                if candidates.numel() == 0:
-                    continue
-                evidence = {"z": drawn["z"][candidates]}
-                for other in concepts:
-                    if other.name != variable.name:
-                        evidence[other.name] = drawn[other.name][candidates]
-                evidence[variable.name] = value.expand(candidates.numel(), -1)
-                steered = predict_states(
-                    classifier, ctx.decode(evidence), annotations
-                )[variable.name]
-                rates.append((steered == index).float().mean().item())
-            score = 100.0 * (sum(rates) / len(rates)) if rates else float("nan")
-            results[f"steerability_{variable.name}"] = score
+            # The paper's selection step: only samples that do NOT already show
+            # the concept can demonstrate that steering added it.
+            candidates = (predicted[name] == 0).nonzero().flatten()
+            if candidates.numel() == 0:
+                results[f"steerability_{name}"] = float("nan")
+                continue
+            evidence = {"z": drawn["z"][candidates]}
+            for other in ctx.concepts:
+                if other.name != name:
+                    evidence[other.name] = drawn[other.name][candidates]
+            evidence[name] = torch.ones(candidates.numel(), variable.size,
+                                        device=ctx.device)
+            steered = predict_binary(classifier, ctx.decode(evidence), names, batch)[name]
+            score = 100.0 * (steered == 1).float().mean().item()
+            results[f"steerability_{name}"] = score
             per_concept.append(score)
         results["steerability"] = (
             sum(per_concept) / len(per_concept) if per_concept else float("nan")
@@ -587,54 +646,62 @@ METRICS: Dict[str, Metric] = {
 
 
 # --- the external judge ----------------------------------------------------
-def concept_columns(annotations) -> Dict[str, Tuple[int, slice, bool]]:
-    """``{name: (target_index, columns, is_binary)}`` over the flat concept axis.
+def binary_concepts(annotations) -> List[Tuple[str, int]]:
+    """``[(name, target_column)]`` for the **binary** concepts only.
 
-    Keyed by name, not position: the classifier is trained from the *data's*
-    annotations while the metrics address the *model's* concept variables, and
-    ``ConceptDataset`` reorders concepts by type, so the two orders need not
-    agree. ``target_index`` is the column of the ground-truth tensor ``c``.
+    ``target_column`` indexes the ground-truth tensor ``c``. Non-binary concepts
+    are left out: :class:`Steerability` is defined for binary concepts (the
+    paper's "turn the concept on" has no single meaning for a k-way one), so the
+    judge is not asked to predict them either — which also keeps it small.
 
-    One column for a binary concept, ``cardinality`` for a categorical one — the
-    same layout :func:`concept_states` produces.
+    Returned as a list of names rather than positions because the classifier is
+    trained from the *data's* annotations while the metric addresses the *model's*
+    concept variables, and ``ConceptDataset`` reorders concepts by type, so the
+    two orders need not agree.
     """
-    out, start = {}, 0
-    for index, (name, cardinality, kind) in enumerate(
-        zip(annotations.labels, annotations.cardinalities, annotations.types)
-    ):
-        width = 1 if kind == "binary" else cardinality
-        out[name] = (index, slice(start, start + width), kind == "binary")
-        start += width
-    return out
+    return [(name, index)
+            for index, (name, kind) in enumerate(zip(annotations.labels, annotations.types))
+            if kind == "binary"]
 
 
-def predict_states(classifier: nn.Module, flat: torch.Tensor, annotations) -> Dict[str, torch.Tensor]:
-    """Each concept's predicted **state index**, per sample.
+def predict_binary(classifier: nn.Module, flat: torch.Tensor, names: Sequence[str],
+                   batch_size: int = 128) -> Dict[str, torch.Tensor]:
+    """Each binary concept's predicted ``0``/``1``, per sample.
 
-    Indices line up with :func:`concept_states`: ``0``/``1`` from a threshold for
-    a binary concept, the argmax over its own columns for a categorical one.
+    Batched: the metric classifies every generated sample at once otherwise, which
+    on a GPU already holding the generative model is where the analysis runs out
+    of memory.
     """
+    chunks = []
     with torch.inference_mode():
-        logits = classifier(flat.clamp(0, 1))
-    return {
-        name: ((logits[:, columns].squeeze(-1) > 0).long() if binary
-               else logits[:, columns].argmax(-1))
-        for name, (_, columns, binary) in concept_columns(annotations).items()
-    }
+        for start in range(0, flat.shape[0], batch_size):
+            logits = classifier(flat[start:start + batch_size].clamp(0, 1))
+            chunks.append((logits > 0).long())
+    predicted = torch.cat(chunks) if chunks else torch.zeros(0, len(names), dtype=torch.long)
+    return {name: predicted[:, i] for i, name in enumerate(names)}
 
 
-def train_concept_classifier(datamodule, modality: Modality, device, epochs=5, lr=1e-3):
+def train_concept_classifier(datamodule, modality: Modality, device,
+                             epochs=5, lr=1e-3, width=16):
     """Train the external judge on real data; return ``(classifier, test accuracy)``.
 
-    One head per concept column, each scored by the loss its type calls for:
-    binary concepts by ``binary_cross_entropy_with_logits``, categorical ones by
-    cross-entropy over their own columns. Accuracy is the mean over concepts of
-    per-concept accuracy on the test split — the number the paper requires to be
-    at least 98% before the steerability figure means anything.
+    One binary head per binary concept, scored by
+    ``binary_cross_entropy_with_logits``. Non-binary concepts are not predicted at
+    all — :class:`Steerability` does not score them, so a head for them would be
+    parameters trained for nothing.
+
+    Accuracy is the mean over concepts of per-concept accuracy on the test split:
+    the number the paper requires to be at least 98% before the steerability
+    figure means anything.
     """
-    annotations = datamodule.annotations
-    columns = list(concept_columns(annotations).values())
-    classifier = modality.build_classifier(annotations.size).to(device)
+    columns = binary_concepts(datamodule.annotations)
+    if not columns:
+        raise ValueError(
+            "The steerability judge needs at least one binary concept; this "
+            f"dataset annotates types {list(datamodule.annotations.types)}."
+        )
+    targets = torch.tensor([index for _, index in columns], device=device)
+    classifier = modality.build_classifier(len(columns), width).to(device)
     optimiser = torch.optim.AdamW(classifier.parameters(), lr=lr)
 
     classifier.train()
@@ -643,12 +710,8 @@ def train_concept_classifier(datamodule, modality: Modality, device, epochs=5, l
             x = batch["inputs"]["x"].to(device)
             c = batch["concepts"]["c"].to(device)
             logits = classifier(x.reshape(x.shape[0], -1))
-            loss = sum(
-                nn.functional.binary_cross_entropy_with_logits(
-                    logits[:, cols].squeeze(-1), c[:, i].float())
-                if binary else
-                nn.functional.cross_entropy(logits[:, cols], c[:, i].long())
-                for i, cols, binary in columns
+            loss = nn.functional.binary_cross_entropy_with_logits(
+                logits, c[:, targets].float()
             )
             optimiser.zero_grad()
             loss.backward()
@@ -661,17 +724,15 @@ def train_concept_classifier(datamodule, modality: Modality, device, epochs=5, l
         for batch in loader:
             x = batch["inputs"]["x"].to(device)
             c = batch["concepts"]["c"].to(device)
-            logits = classifier(x.reshape(x.shape[0], -1))
-            for slot, (i, cols, binary) in enumerate(columns):
-                pred = ((logits[:, cols].squeeze(-1) > 0).long() if binary
-                        else logits[:, cols].argmax(-1))
-                correct[slot] += (pred.cpu() == c[:, i].long().cpu()).sum()
+            predicted = (classifier(x.reshape(x.shape[0], -1)) > 0).long()
+            correct += (predicted == c[:, targets].long()).sum(0).cpu()
             total += x.shape[0]
     accuracy = float((correct / max(total, 1)).mean())
     if accuracy < 0.98:
         logger.warning(
             "concept classifier reached %.1f%% accuracy, below the 98%% the "
-            "steerability metric assumes; raise `classifier_epochs`.", 100 * accuracy
+            "steerability metric assumes; raise `classifier_epochs` or "
+            "`classifier_width`.", 100 * accuracy
         )
     return classifier, accuracy
 
