@@ -292,7 +292,7 @@ class TestNormalObservation:
     def test_generation_through_ancestral_sampling(self, binary_annotations):
         """The scale head's ``(B, size)`` output must survive an *unconditioned*
         decode of a multi-dimensional observation — the exact path
-        ``run_generative_analysis.py`` uses to produce ``overview.png`` and the
+        ``analysis/run_generative_analysis.py`` uses to produce ``overview.png`` and the
         steering figures. A scale collapsed to ``(1,)``/``()`` would raise deep
         inside the relaxed-distribution builder here, not at training time."""
         image_shape = (1, 8, 8)

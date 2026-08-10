@@ -131,7 +131,7 @@ def interventional_to_dataframe(all_results, meta_keys, seed_key="seed"):
     return agg
 
 
-@hydra.main(config_path="conf", config_name="analysis", version_base="1.3")
+@hydra.main(config_path="../conf", config_name="analysis", version_base="1.3")
 def main(cfg: DictConfig) -> None:
 
     # ---- Resolve meta keys ----
