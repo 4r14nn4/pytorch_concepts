@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import math
 import statistics
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -772,9 +773,20 @@ def write_results(rows: List[Dict[str, object]], out_root: Path) -> Tuple[Path, 
             record = {"model_name": model, "dataset_name": dataset,
                       "n_seeds": len(group)}
             for metric in metrics:
-                values = [float(r[metric]) for r in group
-                          if isinstance(r.get(metric), (int, float))]
+                reported = [float(r[metric]) for r in group
+                            if isinstance(r.get(metric), (int, float))]
+                if not reported:
+                    continue  # metric not computed for this model: blank cells
+                # A metric can legitimately report nan for a run -- steerability
+                # on a model with no binary concepts, say -- and averaging must
+                # survive it. Non-finite values are excluded from the statistics
+                # (`statistics.stdev` cannot even accept them: it evaluates its
+                # sums as exact Fractions and raises AttributeError on nan/inf),
+                # and a group with nothing finite left keeps its nan rather than
+                # silently becoming a blank cell.
+                values = [v for v in reported if math.isfinite(v)]
                 if not values:
+                    record[f"{metric}_mean"] = record[f"{metric}_std"] = float("nan")
                     continue
                 record[f"{metric}_mean"] = statistics.fmean(values)
                 # A single seed has no spread; report 0.0 rather than blank, so a
