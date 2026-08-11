@@ -61,11 +61,6 @@ class ForwardInference(TorchBaseInference, ABC):
         level concurrently via ``torch.jit.fork``. For a stochastic engine this
         makes the RNG draw order non-deterministic, trading reproducibility for
         speed.
-    activate_before_propagation : bool, optional
-        Deterministic engines only: pass each propagated parameter through its
-        family's default activation before feeding it to child CPDs, so a CPD
-        emitting ``logits`` propagates probabilities downstream. The parameters
-        reported in ``out.params`` stay the raw, non-activated values.
 
     Raises
     ------
@@ -89,7 +84,6 @@ class ForwardInference(TorchBaseInference, ABC):
         annealing_rate: float = 0.0,
         final_temperature: float = 1e-6,
         parallelize_levels: bool = False,
-        activate_before_propagation: bool = True,
     ):
         super().__init__(
             pgm,
@@ -100,11 +94,6 @@ class ForwardInference(TorchBaseInference, ABC):
             p_int=p_int,
         )
         self._require_directed()
-        # When True (deterministic engines only), the propagated parameter is
-        # passed through its default activation before being fed to child CPDs.
-        # The parameters reported in the inference output stay the raw
-        # (non-activated) values produced by the CPD.
-        self.activate_before_propagation = bool(activate_before_propagation)
         # When True, variables in the same topological level (conditionally
         # independent given the previous levels) are evaluated concurrently.
         self.parallelize_levels = bool(parallelize_levels)
@@ -122,7 +111,6 @@ class ForwardInference(TorchBaseInference, ABC):
             annealing_rate=self.annealing_rate,
             final_temperature=self.final_temperature,
             parallelize_levels=self.parallelize_levels,
-            activate_before_propagation=self.activate_before_propagation,
         )
 
     @property

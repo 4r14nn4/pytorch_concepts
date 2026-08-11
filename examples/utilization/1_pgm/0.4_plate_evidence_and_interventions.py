@@ -46,14 +46,14 @@ def main():
             # for that parameter off the variable's distribution family.
             ParametricCPD(concepts, parents=[x], parametrization=Sequential(
                 LinearEmbeddingToConcept(in_embeddings=X, out_concepts=concepts.size),
-                DefaultActivation.for_variable(concepts, "probs"))),
+                DefaultActivation(concepts, "probs"))),
             ParametricCPD(xor, parents=[concepts], parametrization=Sequential(
                 LinearConceptToConcept(in_concepts=concepts.size, out_concepts=2),
-                DefaultActivation.for_variable(xor, "probs"))),
+                DefaultActivation(xor, "probs"))),
             # child wired to a SINGLE member of the plate via concepts.member("c1")
             ParametricCPD(y1, parents=[concepts.member("c1")], parametrization=Sequential(
                 LinearConceptToConcept(in_concepts=1, out_concepts=1),
-                DefaultActivation.for_variable(y1, "probs"))),
+                DefaultActivation(y1, "probs"))),
         ],
     )
 

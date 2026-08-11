@@ -42,7 +42,7 @@ def main():
         # genotype: learnable predisposition driven by the exogenous noise.
         "genotype": torch.nn.Sequential(
             torch.nn.Linear(1, 1),
-            DefaultActivation("probs", Bernoulli),
+            DefaultActivation(genotype_var, "probs"),
         ),
         # smoking := 1[genotype].
         "smoking": CallableConceptToConcept(lambda g: (g > 0.5).float(), use_bias=False),
