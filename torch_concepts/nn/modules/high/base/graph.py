@@ -204,40 +204,22 @@ class DirectedGraphModel(GraphModel, ABC):
         )
 
     def _activate(self, variable, param, head, activate=True) -> nn.Module:
-        """Compose ``head`` with the activation for ``param``'s domain.
+        """Compose ``head`` with :class:`~torch_concepts.nn.DefaultActivation` for ``param``.
 
-        A no-op when ``activate`` is False: the head already emits a valid
-        parameter.
+        A no-op when ``activate`` is False, or when ``param`` is unconstrained
+        (``logits``, ``loc``, a Delta's ``value``) — ``head`` is then returned
+        untouched rather than wrapped in a ``Sequential`` that computes nothing.
 
-        ``head`` may be an unbuilt :class:`~torch_concepts.nn.LazyConstructor`;
-        the CPD sizes it from the parents and this parameter's width when it
-        builds the ``Sequential`` (see :meth:`ParametricCPD._instantiate_lazy`),
-        which is how a ``scale_tril`` head gets its ``size * (size + 1) // 2``
-        outputs rather than ``size``.
+        ``head`` may be an unbuilt :class:`~torch_concepts.nn.LazyConstructor`,
+        sized by the CPD once the parents are known (see
+        :meth:`ParametricCPD._instantiate_lazy`).
         """
         if not activate:
             return head
-        activation = self._param_activation(variable, param)
-        # An unconstrained parameter (`logits`, `loc`, a Delta's `value`) resolves
-        # to the identity. Return the head untouched there rather than wrapping it
-        # in a Sequential that computes nothing and shifts its state_dict keys.
-        inner = getattr(activation, "activation", activation)
-        if isinstance(inner, nn.Identity):
+        activation = DefaultActivation(variable, param)
+        if isinstance(activation.activation, nn.Identity):
             return head
         return Sequential(head, activation)
-
-    def _param_activation(self, variable, param) -> nn.Module:
-        """The activation mapping a raw head's output into ``param``'s domain.
-
-        The family's standard choice, read off its
-        :class:`~torch_concepts.nn.modules.mid.distributions.DistributionSpec`:
-        a sigmoid for a ``Bernoulli``'s ``probs``, a per-member softmax for a
-        categorical's, ``softplus`` for a per-element ``scale`` (a ``Normal``),
-        the Cholesky assembly for a matrix-valued ``scale_tril`` (a
-        ``MultivariateNormal``), and the identity for anything unconstrained.
-        Override to use a different one, e.g. an exponential for the scale.
-        """
-        return DefaultActivation.for_variable(variable, param)
 
     @staticmethod
     def plate_compatible_levels(

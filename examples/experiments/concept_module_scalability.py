@@ -84,7 +84,7 @@ def build_individual(names: List[str]) -> BayesianNetwork:
     concepts = ConceptVariable(names, distribution=Bernoulli)            # N variables
     cpds = ParametricCPD(                                                 # N CPDs
         concepts, parents=[latent_var],
-        parametrization=Sequential(LinearEmbeddingToConcept(LATENT_DIMS, 1), DefaultActivation("probs", Bernoulli)),
+        parametrization=Sequential(LinearEmbeddingToConcept(LATENT_DIMS, 1), DefaultActivation(concepts[0], "probs")),
     )
     return BayesianNetwork(
         variables=[input_var, latent_var, *concepts],
@@ -99,7 +99,7 @@ def build_shared(names: List[str]) -> BayesianNetwork:
     cpd = ParametricCPD(
         concepts, parents=[latent_var],
         parametrization=Sequential(
-            LinearEmbeddingToConcept(LATENT_DIMS, concepts.size), DefaultActivation("probs", Bernoulli)),
+            LinearEmbeddingToConcept(LATENT_DIMS, concepts.size), DefaultActivation(concepts, "probs")),
     )
     return BayesianNetwork(variables=[input_var, latent_var, concepts],
                            factors=[input_cpd, backbone, cpd])

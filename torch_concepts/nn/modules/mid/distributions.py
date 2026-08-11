@@ -12,8 +12,6 @@ Field                        Answers the question
                              expand to (and is the shorthand legal at all)?
 ``primary_param``            which parameter carries the canonical value used
                              for deterministic propagation?
-``activations``              how is a supplied parameter mapped into the
-                             canonical one's domain (``logits`` -> ``probs``)?
 ``param_activations``        which activation module turns a raw network output
                              into a *valid* value of this parameter?
 ``mode``                     what is its hard, most-likely value?
@@ -42,7 +40,7 @@ distribution, add its :class:`DistributionSpec` to :data:`SPECS` here.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from functools import lru_cache, partial
+from functools import lru_cache
 from typing import Callable, Dict, Mapping, Optional, Tuple
 
 import torch
@@ -55,10 +53,6 @@ from ....distributions.delta import Delta
 # ---------------------------------------------------------------------------
 # Small named helpers (kept out of the registry so the entries stay readable).
 # ---------------------------------------------------------------------------
-def _identity(x: torch.Tensor) -> torch.Tensor:
-    return x
-
-
 def _per_element(size: int) -> int:
     """One scalar per event element — the common case."""
     return size
@@ -120,29 +114,26 @@ def _relaxed_one_hot_st(params, temperature, validate_args):
     )
 
 
-_softmax = partial(torch.softmax, dim=-1)
-
-
 # ---------------------------------------------------------------------------
 # Activation factories for :attr:`DistributionSpec.param_activations`.
 #
 # Each returns the ``nn.Module`` mapping a *raw* network output into one
-# parameter's domain, given the variable's event ``size`` and — for a plate —
-# its per-member width. Both are optional: only the categorical and Cholesky
-# factories consult them. :class:`~torch_concepts.nn.DefaultActivation` is the
-# single caller.
+# parameter's domain, given the variable's event ``size`` and its per-member
+# width (equal, for a lone variable). Only the categorical and Cholesky factories
+# consult them. :class:`~torch_concepts.nn.DefaultActivation` is the only caller
+# — it is also how inference maps ``logits`` to ``probs``.
 # ---------------------------------------------------------------------------
-def _sigmoid_activation(size=None, member_size=None) -> nn.Module:
+def _sigmoid_activation(size: int, member_size: int) -> nn.Module:
     """A Bernoulli's ``probs``: one independent probability per bit."""
     return nn.Sigmoid()
 
 
-def _softplus_activation(size=None, member_size=None) -> nn.Module:
+def _softplus_activation(size: int, member_size: int) -> nn.Module:
     """A Normal's ``scale``: positive, one per event element."""
     return nn.Softplus()
 
 
-def _softmax_activation(size=None, member_size=None) -> nn.Module:
+def _softmax_activation(size: int, member_size: int) -> nn.Module:
     """A categorical's ``probs``: each *member*'s states sum to one.
 
     A plate stacks ``size // member_size`` members along the last axis, so the
@@ -150,7 +141,7 @@ def _softmax_activation(size=None, member_size=None) -> nn.Module:
     lone variable is one member wide (``member_size == size``) and collapses to
     a plain softmax.
     """
-    if not size or not member_size or member_size == size:
+    if member_size == size:
         return nn.Softmax(dim=-1)
     return nn.Sequential(
         nn.Unflatten(-1, (size // member_size, member_size)),
@@ -159,18 +150,12 @@ def _softmax_activation(size=None, member_size=None) -> nn.Module:
     )
 
 
-def _tril_activation(size=None, member_size=None) -> nn.Module:
+def _tril_activation(size: int, member_size: int) -> nn.Module:
     """A MultivariateNormal's ``scale_tril``: a positive-diagonal Cholesky factor."""
     # Deferred like ``ParametricCPD._instantiate_lazy``'s LazyConstructor import,
     # so this registry never pulls in the low level at module-import time.
     from ..low.scales import TrilActivation
 
-    if not size:
-        raise ValueError(
-            "DefaultActivation('scale_tril'): a MultivariateNormal's Cholesky factor "
-            "needs the event `size` to know the matrix side length. Pass size=..., "
-            "or use DefaultActivation.for_variable(variable, 'scale_tril')."
-        )
     return TrilActivation(size)
 
 
@@ -195,22 +180,17 @@ class DistributionSpec:
     primary_param : str
         The parameter holding the canonical value propagated in deterministic
         mode (``loc`` for Normal, ``probs`` for Bernoulli, ``value`` for Delta).
-    activations : mapping
-        Parameter name -> activation mapping *this* parameter into the
-        :attr:`primary_param`'s domain (e.g. ``logits`` -> ``sigmoid`` yields
-        ``probs``). The primary parameter maps to itself, so
-        ``activations['probs']`` is the identity. Consumed at inference time by
-        :func:`~torch_concepts.nn.modules.mid.inference.torch.utils._activate`.
     param_activations : mapping
         Parameter name -> ``(size, member_size) -> nn.Module`` building the
         activation that turns a *raw, unconstrained* network output into a valid
         value of that parameter (``probs`` -> ``Sigmoid``, ``scale`` ->
-        ``Softplus``). The complement of ``activations``, which assumes the
-        parameter is already valid: here ``probs`` is what needs squashing and
-        ``logits`` is what does not. A missing entry means the parameter is
-        unconstrained (``logits``, ``loc``, a Delta's ``value``), so
+        ``Softplus``). A missing entry means the parameter is unconstrained
+        (``logits``, ``loc``, a Delta's ``value``), so
         :class:`~torch_concepts.nn.DefaultActivation` resolves it to
-        ``nn.Identity``.
+        ``nn.Identity``. Used at build time to compose a head, and at inference
+        time to turn ``logits`` into the ``primary_param``'s value — the two are
+        the same map, so a family declares it once (see
+        :func:`~torch_concepts.nn.modules.mid.inference.torch.utils.propagated_value`).
     mode : callable, optional
         Maps an *activated* parameter to the family's hard mode, operating on
         the last axis and preserving its width — a Bernoulli's ``probs`` to
@@ -257,7 +237,6 @@ class DistributionSpec:
     valid_param_sets: Tuple[frozenset, ...]
     default_params: Tuple[str, ...]
     primary_param: str
-    activations: Mapping[str, Callable[[torch.Tensor], torch.Tensor]]
     param_activations: Mapping[str, Callable[..., nn.Module]] = field(
         default_factory=dict
     )
@@ -296,7 +275,6 @@ SPECS: Dict[type, DistributionSpec] = {
         valid_param_sets=(frozenset({"value"}),),
         default_params=("value",),
         primary_param="value",
-        activations={"value": _identity},
         # No ``param_activations``: a point mass constrains nothing, so a raw
         # network output is already a valid ``value``.
         # A point mass has no extra batch dims to reinterpret, and our Delta is
@@ -308,7 +286,6 @@ SPECS: Dict[type, DistributionSpec] = {
         valid_param_sets=_PROBS_OR_LOGITS,
         default_params=("probs",),
         primary_param="probs",
-        activations={"probs": _identity, "logits": torch.sigmoid},
         param_activations={"probs": _sigmoid_activation},
         mode=_threshold,
         is_discrete=True,
@@ -322,7 +299,6 @@ SPECS: Dict[type, DistributionSpec] = {
         valid_param_sets=_PROBS_OR_LOGITS,
         default_params=("probs",),
         primary_param="probs",
-        activations={"probs": _identity, "logits": torch.sigmoid},
         param_activations={"probs": _sigmoid_activation},
         mode=_threshold,
         is_discrete=True,
@@ -335,7 +311,6 @@ SPECS: Dict[type, DistributionSpec] = {
         valid_param_sets=_PROBS_OR_LOGITS,
         default_params=("probs",),
         primary_param="probs",
-        activations={"probs": _identity, "logits": _softmax},
         param_activations={"probs": _softmax_activation},
         mode=_argmax_one_hot,
         is_discrete=True,
@@ -348,7 +323,6 @@ SPECS: Dict[type, DistributionSpec] = {
         valid_param_sets=_PROBS_OR_LOGITS,
         default_params=("probs",),
         primary_param="probs",
-        activations={"probs": _identity, "logits": _softmax},
         param_activations={"probs": _softmax_activation},
         mode=_argmax_one_hot,
         is_discrete=True,
@@ -360,7 +334,6 @@ SPECS: Dict[type, DistributionSpec] = {
         valid_param_sets=_PROBS_OR_LOGITS,
         default_params=("probs",),
         primary_param="probs",
-        activations={"probs": _identity, "logits": _softmax},
         param_activations={"probs": _softmax_activation},
         # A plain Categorical's *value* is encoded as a one-hot of width
         # ``size`` here, not as a class index — the same encoding
@@ -379,7 +352,6 @@ SPECS: Dict[type, DistributionSpec] = {
         valid_param_sets=(frozenset({"loc", "scale"}),),
         default_params=("loc", "scale"),
         primary_param="loc",
-        activations={"loc": _identity, "scale": _identity},
         param_activations={"scale": _softplus_activation},
         wrap_independent=True,
     ),
@@ -388,7 +360,6 @@ SPECS: Dict[type, DistributionSpec] = {
         valid_param_sets=(frozenset({"loc", "scale_tril"}),),
         default_params=("loc", "scale_tril"),
         primary_param="loc",
-        activations={"loc": _identity, "scale_tril": _identity},
         param_activations={"scale_tril": _tril_activation},
     ),
 }
