@@ -22,6 +22,7 @@ The actual graph -> ``BayesianNetwork`` assembly lives one level down, in
 "homogeneous parametrization" assumption. ``GraphModel`` itself only stores and
 exposes the graph structure.
 """
+import copy
 from abc import ABC
 from typing import List, Optional
 
@@ -157,12 +158,11 @@ class DirectedGraphModel(GraphModel, ABC):
             The child variable whose CPD parametrization is being built.
         first : nn.Module
             Layer producing the primary parameter (logits / probs / value / loc).
-        second : nn.Module, optional
-            The continuous variable's scale head: a layer, or an unbuilt
+        second : nn.Module or ``'copy'``, optional
+            The continuous variable's scale head: a layer, an unbuilt
             :class:`~torch_concepts.nn.LazyConstructor` sized by the CPD from the
-            parents just like ``first``. Ignored for discrete / Delta variables,
-            so a caller whose variables may be of any type can pass one
-            unconditionally.
+            parents just like ``first``, or ``'copy'`` for a deep copy of
+            ``first``. Ignored for discrete / Delta variables.
         activate : bool, default True
             Compose each head with the activation landing its output in its own
             parameter's domain (:meth:`_activate`) — so the heads are passed
@@ -186,13 +186,18 @@ class DirectedGraphModel(GraphModel, ABC):
         if "loc" in names:
             # Normal, MultivariateNormal, etc., with a location and a scale parameter
             scale_param = (names - {"loc"}).pop() # either ``scale`` or ``scale_tril``
+            if second == "copy":
+                # Same width as `loc` for every family a model declares, so a copy
+                # fits. A MultivariateNormal's wider `scale_tril` needs its own head.
+                second = copy.deepcopy(first)
             if second is None:
                 raise ValueError(
                     f"_flexible_parametrization: {variable.name!r} "
                     f"({variable.distribution.__name__}) needs a {scale_param!r} head "
                     f"of {param_sizes[scale_param]} outputs. Pass `second` — a raw "
-                    "layer or a LazyConstructor for it. Anything it shares with "
-                    "`first` belongs in the CPD's `trunk`, which runs once for both."
+                    "layer, a LazyConstructor for it, or 'copy' to copy `first`. "
+                    "Anything it shares with `first` belongs in the CPD's `trunk`, "
+                    "which runs once for both."
                 )
             return {
                 "loc": self._activate(variable, "loc", first, activate),

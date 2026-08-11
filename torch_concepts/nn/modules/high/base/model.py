@@ -383,48 +383,6 @@ class BaseModel(nn.Module, ABC):
                 out.append(self._make_concept_variable(name))
         return out
 
-    @staticmethod
-    def _embedding_rows(concept) -> int:
-        """State-embedding rows a concept contributes: 2 for binary, else ``cardinality``.
-
-        A binary concept scores one Bernoulli probability but is mixed from two
-        independent contexts :math:`w^+`, :math:`w^-` (Espinosa Zarlenga et al.,
-        NeurIPS 2022). Must stay in lock-step with
-        :class:`~torch_concepts.nn.modules.low.predictors.mix.MixConceptEmbedding`,
-        which expands a binary concept's group to the same 2 rows.
-        """
-        return 2 if concept.is_binary else concept.cardinality
-
-    @staticmethod
-    def build_concept_head(cvar: ConceptVariable, evar: EmbeddingVariable) -> nn.Module:
-        """Decode ``cvar``'s scores from ``evar``'s state embeddings.
-
-        ``(B, k*rows, m) -> (B, k*out)`` for ``k = len(cvar.members)``, ``rows``
-        embedding rows per member (:meth:`_embedding_rows`) and ``out =
-        cvar.member_size``. Each member reads only its own rows.
-
-        One shared ``Linear(m, 1)`` per row when ``rows == out`` (categorical,
-        continuous); a binary concept's 2 rows feed 1 score, so they are read
-        jointly by a ``Linear(2m, 1)`` instead.
-        """
-        rows, m = evar.shape[0] // len(cvar.members), evar.shape[1]
-        out = cvar.member_size
-        if rows == out:
-            return Sequential(
-                LinearEmbeddingToConcept(in_embeddings=m, out_concepts=1),
-                nn.Flatten(start_dim=-2),  # (B, k*rows, 1) -> (B, k*rows)
-            )
-        # Note: this branch starts with nn.Unflatten, so ParametricCPD's
-        # `_module_input_names` gives it STANDARD aggregation (mod(t)) where the
-        # branch above gets PyC aggregation (mod(embeddings=t)). Same lone parent
-        # tensor either way — only the calling convention differs.
-        return Sequential(
-            nn.Unflatten(-2, (-1, rows)),   # (B, k*rows, m) -> (B, k, rows, m)
-            nn.Flatten(start_dim=-2),       # -> (B, k, rows*m)
-            LinearEmbeddingToConcept(in_embeddings=rows * m, out_concepts=out),
-            nn.Flatten(start_dim=-2),       # (B, k, out) -> (B, k*out)
-        )
-
     def build_concept_embedding_variables(
         self,
         names: List[str],
@@ -434,20 +392,21 @@ class BaseModel(nn.Module, ABC):
     ) -> List[EmbeddingVariable]:
         """Build the per-concept state-embedding variable(s), aligned with the concepts.
 
-        Each concept contributes one state embedding per state — except a
-        binary concept, which contributes **two** (:math:`w^+`, :math:`w^-`;
-        see :meth:`_embedding_rows`) even though it is a single Bernoulli.
+        Each concept contributes ``cardinality`` state embeddings of width
+        ``embedding_size``. A binary concept therefore contributes a single row:
+        its second context :math:`w^-` is derived from the first inside
+        :class:`~torch_concepts.nn.MixConceptEmbeddingToConcept`, not encoded here.
         This uses the **same** :meth:`_plate_layout` as
         :meth:`build_concept_variables`, so — called with the same ``names`` — the
         returned list aligns element-by-element with the concept variables: group
         ``i``'s embeddings feed group ``i``'s concepts. Per group it returns:
 
         * a plate of ``k`` homogeneous concepts → one :class:`EmbeddingVariable` of
-          shape ``(k * rows, embedding_size)`` (the members' state embeddings
-          stacked into one matrix, ``rows`` from :meth:`_embedding_rows`); a lone
-          concept is a single-member plate of shape ``(rows, embedding_size)``;
+          shape ``(k * cardinality, embedding_size)`` (the members' state embeddings
+          stacked into one matrix); a lone concept is a single-member plate of
+          shape ``(cardinality, embedding_size)``;
         * with ``plate=False``, one ``EmbeddingVariable`` per concept of shape
-          ``(rows, embedding_size)``, named via ``name_fmt``.
+          ``(cardinality, embedding_size)``, named via ``name_fmt``.
 
         Only *concept* embeddings belong here. Global/shared embeddings (``input``,
         ``latent``, model-wide latents) are not per-concept and carry no grouping —
@@ -458,11 +417,11 @@ class BaseModel(nn.Module, ABC):
         for kind, name, members in self._plate_layout(names, plate_name):
             if kind == "plate":
                 c0 = self.concept_annotations.concept(members[0])
-                shape = (len(members) * self._embedding_rows(c0), embedding_size)
+                shape = (len(members) * c0.cardinality, embedding_size)
             else:
                 name = name_fmt.format(name)
                 c = self.concept_annotations.concept(members[0])
-                shape = (self._embedding_rows(c), embedding_size)
+                shape = (c.cardinality, embedding_size)
             out.append(EmbeddingVariable(name, distribution=Delta, shape=shape))
         return out
 

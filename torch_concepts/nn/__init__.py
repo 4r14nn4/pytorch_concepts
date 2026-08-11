@@ -37,7 +37,7 @@ from .modules.low.predictors.call import CallableConceptToConcept
 from .modules.low.predictors.hypernet import HyperlinearConceptEmbeddingToConcept
 from .modules.low.predictors.linear import LinearConceptToConcept
 from .modules.low.predictors.mix import MixConceptEmbeddingToConcept, \
-    MixConceptEmbedding
+    MixConceptEmbeddings
 
 # Dense layers
 from .modules.low.dense_layers import Dense, ResidualMLP, MLP, LinearEmbeddingEncoder, NonLinearEmbeddingEncoder, SelectorEmbeddingEncoder
@@ -151,7 +151,7 @@ __all__ = [
     "CallableConceptToConcept",
     "HyperlinearConceptEmbeddingToConcept",
     "MixConceptEmbeddingToConcept",
-    "MixConceptEmbedding",
+    "MixConceptEmbeddings",
 
     # Dense layers
     "Dense",

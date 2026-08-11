@@ -31,6 +31,8 @@ from torch.distributions import Bernoulli, OneHotCategorical, Normal
 from .....annotations import Annotations
 from .....distributions import Delta
 from ...low.dense_layers import LinearEmbeddingEncoder
+from ...low.encoders.linear import LinearEmbeddingToConcept
+from ...low.sequential import Sequential
 from ...low.predictors.mix import MixConceptEmbeddingToConcept
 from ...low.priors import LearnablePrior
 from ...mid.inference.base import BaseInference
@@ -193,16 +195,22 @@ class ConceptEmbeddingModel(BipartiteModel):
                 for e in embeddings
             ],
         )
+        # embeddings → concepts: one score per state embedding (per group).
         c_encoders = [
             ParametricCPD(
                 variable=cvar,
                 parents=[evar],
                 parametrization=self._flexible_parametrization(
                     variable=cvar,
-                    # Two independent heads: `second` is only consulted for a
-                    # continuous concept, which needs its own scale head.
-                    first=self.build_concept_head(cvar, evar),
-                    second=self.build_concept_head(cvar, evar),
+                    first=Sequential(
+                        LinearEmbeddingToConcept(
+                            in_embeddings=self.embedding_size,
+                            out_concepts=1,
+                        ),
+                        # Collapse the (n_concepts, 1) score dims -> n_concepts
+                        nn.Flatten(start_dim=-2),
+                    ),
+                    second="copy",
                 ),
             )
             for cvar, evar in zip(concepts, embeddings)
@@ -223,24 +231,18 @@ class ConceptEmbeddingModel(BipartiteModel):
                 "embeddings": torch.cat(list(embeddings.values()), dim=-2),
             }
 
-        def task_head(tvar):
-            return MixConceptEmbeddingToConcept(
-                in_concepts=reordered_axis,
-                in_embeddings=self.embedding_size,
-                out_concepts=tvar.size,
-                # A binary concept's two state embeddings (w+, w-) already arrive as
-                # two rows from build_concept_embedding_variables — nothing to fabricate.
-                expand_binary_embeddings=False,
-            )
-
         predictors = ParametricCPD(
             variable=tasks,
             parents=[*concepts, *embeddings],
             parametrization=[
                 self._flexible_parametrization(
                     variable=tvar,
-                    first=task_head(tvar),
-                    second=task_head(tvar),
+                    first=MixConceptEmbeddingToConcept(
+                        in_concepts=reordered_axis,
+                        in_embeddings=self.embedding_size,
+                        out_concepts=tvar.size,
+                    ),
+                    second="copy",
                 )
                 for tvar in tasks
             ],

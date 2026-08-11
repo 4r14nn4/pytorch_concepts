@@ -187,25 +187,20 @@ class HomogenGraphModel(DirectedGraphModel, ABC):
                 variables.append(embedding)
 
             if is_root and embedding is not None:
-                # Decode one score per state embedding -> (batch, card).
-                def encoder_head():
-                    return Sequential(
-                        self.build_encoder(
-                            in_embeddings=self.embedding_size,
-                            out_concepts=1,
-                        ),
-                        nn.Flatten(start_dim=1),
-                    )
-
                 concept_cpd = ParametricCPD(
                     variable=concept_var,
                     parents=[embedding],
                     parametrization=self._flexible_parametrization(
                         variable=concept_var,
-                        # Two independent heads: `second` is only consulted for a
-                        # continuous concept, which needs its own scale head.
-                        first=encoder_head(),
-                        second=encoder_head(),
+                        # Decode one score per state embedding -> (batch, card).
+                        first=Sequential(
+                            self.build_encoder(
+                                in_embeddings=self.embedding_size,
+                                out_concepts=1,
+                            ),
+                            nn.Flatten(start_dim=1),
+                        ),
+                        second="copy",
                     ),
                 )
             elif is_root:
@@ -213,35 +208,27 @@ class HomogenGraphModel(DirectedGraphModel, ABC):
                     variable=concept_var,
                     parents=[latent_var],
                     parametrization=self._flexible_parametrization(
-                        variable=concept_var, 
+                        variable=concept_var,
                         first=self.build_encoder(
                             in_embeddings=self.latent_size,
                             out_concepts=concept.cardinality
                         ),
-                        second=self.build_encoder(
-                            in_embeddings=self.latent_size,
-                            out_concepts=concept.cardinality
-                        ),
+                        second="copy",
                     ),
                 )
             else:
                 parent_vars = [concept_vars[p] for p in parents]
-                in_concepts = axis.subset(parents)
-
-                def predictor_head():
-                    return self.build_predictor(
-                        in_concepts=in_concepts,
-                        in_embeddings=self.embedding_size if embedding is not None else None,
-                        out_concepts=concept.cardinality,
-                    )
-
                 concept_cpd = ParametricCPD(
                     variable=concept_var,
                     parents=[*parent_vars, embedding] if embedding is not None else parent_vars,
                     parametrization=self._flexible_parametrization(
-                        variable=concept_var, 
-                        first=predictor_head(),
-                        second=predictor_head(),
+                        variable=concept_var,
+                        first=self.build_predictor(
+                            in_concepts=axis.subset(parents),
+                            in_embeddings=self.embedding_size if embedding is not None else None,
+                            out_concepts=concept.cardinality,
+                        ),
+                        second="copy",
                     ),
                     aggregate=mix_parents if embedding is not None else None,
                 )

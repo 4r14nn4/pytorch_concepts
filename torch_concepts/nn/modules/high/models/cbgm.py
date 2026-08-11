@@ -37,7 +37,8 @@ from .....annotations import Annotations
 from .....concept_graph import ConceptGraph
 from .....distributions import Delta
 from ...low.dense_layers import LinearEmbeddingEncoder, NonLinearEmbeddingEncoder
-from ...low.predictors.mix import MixConceptEmbedding
+from ...low.encoders.linear import LinearEmbeddingToConcept
+from ...low.predictors.mix import MixConceptEmbeddings
 from ...low.priors import FixedPrior
 from ...low.scales import GlobalScale
 from ...mid.inference.base import BaseInference
@@ -54,7 +55,7 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
 
     Generative process ``z → concepts → input``, trained as a VAE through a
     variational guide ``q(z | input)``. The concept bottleneck layer
-    (:class:`~torch_concepts.nn.MixConceptEmbedding`) sits between the
+    (:class:`~torch_concepts.nn.MixConceptEmbeddings`) sits between the
     two halves of the decoder, so intervening on a concept steers the generated
     output.
 
@@ -151,12 +152,10 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
       to a bare :class:`~torch_concepts.nn.LinearEmbeddingEncoder`; set
       ``context_hidden_size`` and ``context_norm='batch'`` to approach it, or
       ``'layer'`` for the batch-independent equivalent.
-    * The reference concept head is a per-concept ``Linear(bins * m, bins)``. A
-      **categorical** concept here keeps the reused CEM head — a ``Linear(m, 1)``
-      shared across states — while a **binary** one matches the reference's
-      ``bins=2``: two state embeddings ``w+``, ``w-`` read jointly by a
-      ``Linear(2m, 1)``
-      (:meth:`~torch_concepts.nn.modules.high.base.model.BaseModel.build_concept_head`).
+    * The reference concept head is a per-concept ``Linear(bins * m, bins)``.
+      Every concept here keeps the CEM head instead — a ``Linear(m, 1)`` shared
+      across state embeddings — including a binary one, whose second state
+      ``w-`` is derived inside the mixture rather than encoded.
     * What the mixture reads is the engine's ``p_int``, not a setting here. At
       ``1.0`` the concepts are teacher-forced on the ground-truth labels: that
       grounds the concept channel, but an intervention then *selects* a state
@@ -191,7 +190,7 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
 
     See Also
     --------
-    torch_concepts.nn.MixConceptEmbedding : the concept bottleneck layer
+    torch_concepts.nn.MixConceptEmbeddings : the concept bottleneck layer
     torch_concepts.nn.functional.concept_orthogonality : the orthogonality penalty
     torch_concepts.nn.GlobalScale : the default ``scale`` head for a Normal observation
     """
@@ -431,14 +430,22 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
                 for e in [*embeddings, *unknowns]
             ],
         )
+        # embeddings → concepts: one score per state embedding (per group).
         c_encoders = [
             ParametricCPD(
                 variable=cvar,
                 parents=[evar],
                 parametrization=self._flexible_parametrization(
                     variable=cvar,
-                    first=self.build_concept_head(cvar, evar),
-                    second=self.build_concept_head(cvar, evar),
+                    first=pyc.nn.Sequential(
+                        LinearEmbeddingToConcept(
+                            in_embeddings=self.embedding_size,
+                            out_concepts=1,
+                        ),
+                        # Collapse the (n_concepts, 1) score dims -> n_concepts
+                        nn.Flatten(start_dim=-2),
+                    ),
+                    second="copy",
                 ),
             )
             for cvar, evar in zip(concepts, embeddings)
@@ -451,25 +458,14 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
                 "embeddings": torch.cat(list(embeddings.values()), dim=-2),
             }
 
-        mixer = MixConceptEmbedding(
-            in_concepts=reordered_axis, # require Annotations as in_concepts
-            in_embeddings=self.embedding_size,
-            # A binary concept's two state embeddings (w+, w-) already arrive as
-            # two rows from build_concept_embedding_variables — nothing to fabricate.
-            expand_binary_embeddings=False,
-        )
-        # Both sides count a binary concept's rows independently; if they ever
-        # disagree the mixture's own assert fires several calls deep with no context.
-        built, expected = sum(e.shape[0] for e in embeddings), int(mixer.cardinalities_expanded.sum())
-        assert built == expected, (
-            f"{type(self).__name__}: built {built} embedding rows, mixer expects {expected} — "
-            "build_concept_embedding_variables and MixConceptEmbedding disagree on binary rows."
-        )
-
         mixing_cpd = ParametricCPD(
             variable=mixing,
             parents=[*concepts, *embeddings],
-            parametrization={"value": mixer},
+            parametrization={
+                "value": MixConceptEmbeddings(
+                    in_concepts=reordered_axis, # require Annotations as in_concepts
+                    in_embeddings=self.embedding_size,
+            )},
             aggregate=mix_parents,
         )
 
