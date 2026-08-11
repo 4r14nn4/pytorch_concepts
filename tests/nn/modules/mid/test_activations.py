@@ -2,7 +2,9 @@
 
 A ``ParametricCPD`` applies no activation, so a head must already emit a value in
 its parameter's domain. ``DefaultActivation`` reads the family's standard mapping
-off its ``DistributionSpec`` instead of making the caller remember it.
+off its ``DistributionSpec`` instead of making the caller remember it. It is built
+from the variable it parametrizes, which is what supplies the family, the event
+width and — for a plate — the per-member width.
 """
 import pytest
 import torch
@@ -31,6 +33,10 @@ from torch_concepts.nn import (
 from torch_concepts.nn.modules.mid.inference.utils import build_distribution
 
 
+def _var(distribution, size=3, members=None):
+    return ConceptVariable("v", members=members, distribution=distribution, size=size)
+
+
 class TestResolution:
     """Which module each (family, parameter) pair resolves to."""
 
@@ -51,46 +57,46 @@ class TestResolution:
         ],
     )
     def test_resolves_the_families_standard_activation(self, param, distribution, expected):
-        assert isinstance(DefaultActivation(param, distribution).activation, expected)
+        assert isinstance(DefaultActivation(_var(distribution), param).activation, expected)
 
     def test_scale_tril_resolves_to_the_cholesky_assembly(self):
-        act = DefaultActivation("scale_tril", MultivariateNormal, size=3)
+        act = DefaultActivation(_var(MultivariateNormal), "scale_tril")
         assert isinstance(act.activation, TrilActivation)
         tril = act(torch.randn(8, 6))
         assert tril.shape == (8, 3, 3)
         assert bool((tril.diagonal(dim1=-2, dim2=-1) > 0).all())
 
     def test_relaxed_families_resolve_like_their_exact_counterparts(self):
-        exact = DefaultActivation("probs", Bernoulli, size=4, member_size=4)
-        relaxed = DefaultActivation("probs", RelaxedBernoulli, size=4, member_size=4)
+        exact = DefaultActivation(_var(Bernoulli, size=4), "probs")
+        relaxed = DefaultActivation(_var(RelaxedBernoulli, size=4), "probs")
         raw = torch.randn(8, 4)
         assert torch.equal(exact(raw), relaxed(raw))
 
     def test_an_unconstrained_parameter_is_a_no_op(self):
         raw = torch.randn(8, 3)
-        assert torch.equal(DefaultActivation("logits", Bernoulli)(raw), raw)
+        assert torch.equal(DefaultActivation(_var(Bernoulli), "logits")(raw), raw)
 
 
 class TestDomains:
     """The output really does land in the parameter's domain."""
 
     def test_bernoulli_probs_are_in_the_unit_interval(self):
-        probs = DefaultActivation("probs", Bernoulli)(torch.randn(8, 5) * 10)
+        probs = DefaultActivation(_var(Bernoulli, size=5), "probs")(torch.randn(8, 5) * 10)
         assert bool(((probs >= 0) & (probs <= 1)).all())
 
     def test_normal_scale_is_positive(self):
-        scale = DefaultActivation("scale", Normal)(torch.randn(8, 5) * 10)
+        scale = DefaultActivation(_var(Normal, size=5), "scale")(torch.randn(8, 5) * 10)
         assert bool((scale > 0).all())
 
     def test_a_lone_categorical_normalises_over_the_whole_row(self):
-        act = DefaultActivation("probs", OneHotCategorical, size=4, member_size=4)
+        act = DefaultActivation(_var(OneHotCategorical, size=4), "probs")
         probs = act(torch.randn(8, 4))
         assert probs.shape == (8, 4)
         assert torch.allclose(probs.sum(-1), torch.ones(8))
 
     def test_a_categorical_plate_normalises_per_member(self):
         # 2 members x 3 states: each member's block sums to 1, not the whole row.
-        act = DefaultActivation("probs", OneHotCategorical, size=6, member_size=3)
+        act = DefaultActivation(_var(OneHotCategorical, size=3, members=["a", "b"]), "probs")
         probs = act(torch.randn(8, 6))
         assert probs.shape == (8, 6)  # stays flat
         assert torch.allclose(probs.reshape(8, 2, 3).sum(-1), torch.ones(8, 2))
@@ -98,71 +104,58 @@ class TestDomains:
         assert torch.allclose(probs.sum(-1), torch.full((8,), 2.0))
 
     def test_leading_dimensions_are_preserved(self):
-        act = DefaultActivation("probs", OneHotCategorical, size=6, member_size=3)
+        act = DefaultActivation(_var(OneHotCategorical, size=3, members=["a", "b"]), "probs")
         probs = act(torch.randn(4, 5, 6))
         assert probs.shape == (4, 5, 6)
         assert torch.allclose(probs.reshape(4, 5, 2, 3).sum(-1), torch.ones(4, 5, 2))
 
 
-class TestForVariable:
-    """``for_variable`` pulls family, size and member width off a Variable."""
+class TestPlates:
+    """A plate's per-member width comes off the variable, so it cannot be forgotten."""
 
     def test_plate_of_bernoullis(self):
         v = ConceptVariable("c", members=["c1", "c2", "c3"], distribution=Bernoulli)
-        act = DefaultActivation.for_variable(v, "probs")
-        assert isinstance(act.activation, nn.Sigmoid)
+        assert isinstance(DefaultActivation(v, "probs").activation, nn.Sigmoid)
 
     def test_plate_of_categoricals_normalises_per_member(self):
         v = ConceptVariable("c", members=["c1", "c2"], distribution=OneHotCategorical, size=3)
-        act = DefaultActivation.for_variable(v, "probs")
-        probs = act(torch.randn(8, v.size))
+        probs = DefaultActivation(v, "probs")(torch.randn(8, v.size))
         assert torch.allclose(probs.reshape(8, 2, 3).sum(-1), torch.ones(8, 2))
 
-    def test_lone_categorical_matches_the_explicit_form(self):
+    def test_a_lone_categorical_is_one_member_wide(self):
         v = ConceptVariable("c", distribution=OneHotCategorical, size=5)
-        raw = torch.randn(8, 5)
-        assert torch.equal(
-            DefaultActivation.for_variable(v, "probs")(raw),
-            DefaultActivation("probs", OneHotCategorical, size=5, member_size=5)(raw),
-        )
+        probs = DefaultActivation(v, "probs")(torch.randn(8, 5))
+        assert torch.allclose(probs.sum(-1), torch.ones(8))
 
     def test_supplies_the_size_scale_tril_needs(self):
         v = ConceptVariable("c", distribution=MultivariateNormal, size=3)
-        assert DefaultActivation.for_variable(v, "scale_tril")(torch.randn(8, 6)).shape == (8, 3, 3)
+        assert DefaultActivation(v, "scale_tril")(torch.randn(8, 6)).shape == (8, 3, 3)
 
 
 class TestErrors:
     def test_a_parameter_the_family_does_not_have_is_rejected(self):
         with pytest.raises(ValueError, match=r"Normal has no parameter 'probs'"):
-            DefaultActivation("probs", Normal)
+            DefaultActivation(_var(Normal), "probs")
 
     def test_the_error_lists_the_valid_parameter_names(self):
         with pytest.raises(ValueError, match=r"\['loc', 'scale'\]"):
-            DefaultActivation("probs", Normal)
-
-    def test_scale_tril_without_a_size_is_rejected(self):
-        with pytest.raises(ValueError, match="needs the event `size`"):
-            DefaultActivation("scale_tril", MultivariateNormal)
-
-    def test_an_unregistered_family_is_rejected(self):
-        with pytest.raises(ValueError, match="not a supported family"):
-            DefaultActivation("probs", torch.distributions.Poisson)
+            DefaultActivation(_var(Normal), "probs")
 
 
 class TestModuleHygiene:
     def test_the_activation_is_a_child_module(self):
-        act = DefaultActivation("scale_tril", MultivariateNormal, size=3)
+        act = DefaultActivation(_var(MultivariateNormal), "scale_tril")
         assert "activation" in dict(act.named_children())
 
     def test_buffers_travel_with_the_module(self):
-        act = DefaultActivation("scale_tril", MultivariateNormal, size=3)
+        act = DefaultActivation(_var(MultivariateNormal), "scale_tril")
         # TrilActivation's index buffers are non-persistent, so they stay out of
         # state_dict but must still follow a dtype/device cast.
         act = act.to(torch.float64)
         assert act(torch.randn(8, 6, dtype=torch.float64)).dtype == torch.float64
 
     def test_repr_names_the_parameter_and_the_family(self):
-        text = repr(DefaultActivation("probs", Bernoulli))
+        text = repr(DefaultActivation(_var(Bernoulli), "probs"))
         assert "param='probs'" in text and "distribution=Bernoulli" in text
 
 
@@ -176,9 +169,7 @@ class TestInsideACPD:
             c,
             parents=[x],
             parametrization={
-                "probs": nn.Sequential(
-                    nn.Linear(4, c.size), DefaultActivation.for_variable(c, "probs")
-                )
+                "probs": nn.Sequential(nn.Linear(4, c.size), DefaultActivation(c, "probs"))
             },
         )
         params = cpd(parent_values={"x": torch.randn(8, 4)})
@@ -192,9 +183,7 @@ class TestInsideACPD:
         cpd = ParametricCPD(
             c,
             parents=[x],
-            parametrization=Sequential(
-                nn.Linear(4, 3), DefaultActivation.for_variable(c, "probs")
-            ),
+            parametrization=Sequential(nn.Linear(4, 3), DefaultActivation(c, "probs")),
         )
         probs = cpd(parent_values={"x": torch.randn(8, 4)})["probs"]
         assert bool(((probs >= 0) & (probs <= 1)).all())
@@ -207,7 +196,7 @@ class TestInsideACPD:
             parents=[x],
             parametrization={
                 "loc": nn.Linear(4, 2),
-                "scale": nn.Sequential(nn.Linear(4, 2), DefaultActivation("scale", Normal)),
+                "scale": nn.Sequential(nn.Linear(4, 2), DefaultActivation(z, "scale")),
             },
         )
         params = cpd(parent_values={"x": torch.randn(8, 4)})
@@ -215,7 +204,8 @@ class TestInsideACPD:
         build_distribution(z, params)
 
     def test_gradients_flow_through_the_activation(self):
-        head = nn.Sequential(nn.Linear(4, 3), DefaultActivation("probs", Bernoulli))
+        c = ConceptVariable("c", distribution=Bernoulli, size=3)
+        head = nn.Sequential(nn.Linear(4, 3), DefaultActivation(c, "probs"))
         head(torch.randn(8, 4)).sum().backward()
         assert head[0].weight.grad is not None
 
@@ -226,7 +216,7 @@ class TestInsideACPD:
         cpds = ParametricCPD(
             cs,
             parents=[x],
-            parametrization=nn.Sequential(nn.Linear(4, 1), DefaultActivation("probs", Bernoulli)),
+            parametrization=nn.Sequential(nn.Linear(4, 1), DefaultActivation(cs[0], "probs")),
         )
         assert len(cpds) == 2
         model = BayesianNetwork(variables=[x, *cs], factors=[

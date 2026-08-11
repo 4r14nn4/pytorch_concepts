@@ -38,7 +38,7 @@ def pgm():
             }),
             ParametricCPD(c, parents=[z], parametrization={
                 "probs": nn.Sequential(
-                    nn.Linear(4, 3), DefaultActivation.for_variable(c, "probs")
+                    nn.Linear(4, 3), DefaultActivation(c, "probs")
                 )
             }),
         ],

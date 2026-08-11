@@ -61,7 +61,7 @@ class TestSharedForward:
             parametrization={
                 "loc": nn.Linear(8, 3),
                 "scale": nn.Sequential(
-                    nn.Linear(8, 3), DefaultActivation.for_variable(normal_child, "scale")
+                    nn.Linear(8, 3), DefaultActivation(normal_child, "scale")
                 ),
             },
         )
@@ -176,7 +176,7 @@ class TestInteractions:
         cpds = ParametricCPD(
             cs, parents=[parent], trunk=CountingTrunk(4, 8),
             parametrization={"probs": nn.Sequential(
-                nn.Linear(8, 1), DefaultActivation("probs", Bernoulli))},
+                nn.Linear(8, 1), DefaultActivation(cs[0], "probs"))},
         )
         assert cpds[0].trunk is not cpds[1].trunk
         assert cpds[0].trunk.linear.weight is not cpds[1].trunk.linear.weight
@@ -187,7 +187,7 @@ class TestInteractions:
         cpd = ParametricCPD(
             c, parents=[parent], trunk=trunk,
             parametrization={"probs": nn.Sequential(
-                nn.Linear(8, 3), DefaultActivation.for_variable(c, "probs"))},
+                nn.Linear(8, 3), DefaultActivation(c, "probs"))},
         )
 
         class Pgm:
