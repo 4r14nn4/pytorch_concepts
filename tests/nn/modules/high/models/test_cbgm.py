@@ -178,25 +178,24 @@ class TestGuideSharesOneBackbonePass:
 
 
 class TestBinaryStateEmbeddings:
-    """A binary concept is scored by one Bernoulli probability but mixed from
-    TWO independent context embeddings (w+, w-), matching the CEM/CBGM papers
-    (Espinosa Zarlenga et al., NeurIPS 2022; Ismail et al., ICLR 2024, Sec 3.1)
-    instead of fabricating the second state with a learned splitter.
+    """A binary concept is scored by one Bernoulli probability and encoded as ONE
+    state embedding; its second context (w-) is derived from the first by the
+    mixture layer's learned splitter, not encoded separately.
     """
 
-    def test_binary_embedding_variable_has_two_rows(self, binary_annotations):
+    def test_binary_embedding_variable_has_one_row(self, binary_annotations):
         model = build_model(binary_annotations, plate=False)
         for name in ("a_embedding", "b_embedding"):
-            assert tuple(model.pgm.variables[name].shape) == (2, EMBEDDING_SIZE)
+            assert tuple(model.pgm.variables[name].shape) == (1, EMBEDDING_SIZE)
 
-    def test_binary_plate_gets_two_rows_per_member(self):
+    def test_binary_plate_gets_one_row_per_member(self):
         annotations = Annotations(
             labels=["b0", "b1"], cardinalities=[1, 1], types=["binary", "binary"],
         )
         model = build_model(annotations, plate=True)
         # A single plate: both binary concepts homogeneous -> one embedding
         # variable holding both members' rows, member-major.
-        assert tuple(model.pgm.variables["embeddings"].shape) == (4, EMBEDDING_SIZE)
+        assert tuple(model.pgm.variables["embeddings"].shape) == (2, EMBEDDING_SIZE)
 
     def test_concept_probability_shape_is_unaffected(self, binary_annotations):
         """The concept variable itself stays a single Bernoulli — only its
@@ -220,10 +219,10 @@ class TestBinaryStateEmbeddings:
         # assembles still matches that width.
         model(query=list(model.pgm.variables), input=torch.rand(3, INPUT_SIZE))
 
-    def test_no_learned_splitter_anywhere_in_the_model(self, binary_annotations):
+    def test_the_learned_splitter_supplies_the_second_state(self, binary_annotations):
         model = build_model(binary_annotations, plate=False)
         names = [n for n, _ in model.named_parameters()]
-        assert not any("splitter" in n for n in names)
+        assert any("splitter" in n for n in names)
 
     def test_backward_reaches_the_binary_embedding_encoder(self, binary_annotations):
         """Both w+ and w- must be trainable: the reconstruction gradient has to
@@ -326,19 +325,29 @@ class TestContinuousConcepts:
         """`loc` and `scale` need their own scoring layers.
 
         Putting the shared scoring layer in a `trunk` and leaving the heads as
-        bare activations makes `scale == softplus(loc)`: a parameter-free head
-        pinning the spread to the mean.
+        bare activations makes `scale == softplus(loc)` *forever*: a
+        parameter-free head pinning the spread to the mean. The two heads are
+        built by copying one description, so they start out agreeing; what
+        matters is that each owns its weights and can therefore diverge.
         """
         annotations = Annotations(
             labels=["a", "h"], cardinalities=[1, 1], types=["binary", "continuous"]
         )
         cpd = build_model(annotations, plate=False).pgm.factors["h"]
         embedding = torch.randn(5, 1, EMBEDDING_SIZE)
-        params = cpd(parent_values={"h_embedding": embedding})
 
-        assert not torch.allclose(params["scale"], F.softplus(params["loc"]))
         for head in ("loc", "scale"):
             assert sum(p.numel() for p in cpd.parametrization[head].parameters()) > 0
+
+        optimizer = torch.optim.SGD(cpd.parameters(), lr=0.1)
+        optimizer.zero_grad()
+        params = cpd(parent_values={"h_embedding": embedding})
+        # A loss that pulls loc and scale in different directions.
+        (params["loc"].sum() + 3.0 * params["scale"].sum()).backward()
+        optimizer.step()
+
+        params = cpd(parent_values={"h_embedding": embedding})
+        assert not torch.allclose(params["scale"], F.softplus(params["loc"]))
 
 
 class TestTeacherForcingRate:
@@ -372,8 +381,10 @@ class TestTeacherForcingRate:
 
     @staticmethod
     def _state_embedding_weight(model, name="a_embedding"):
-        parametrization = model.pgm.factors[name].parametrization["value"]
-        return next(p for _, p in parametrization.named_parameters() if p.dim() == 2)
+        """The ``Linear(m, 2m)`` deriving (w+, w-) from a binary concept's single
+        encoded row: its first ``m`` output rows produce w+, the rest w-."""
+        return next(p for n, p in model.named_parameters()
+                    if "splitter" in n and p.dim() == 2)
 
     def _reconstruction_grads(self, p_int):
         """(‖grad w+‖, ‖grad w-‖) from reconstruction alone, all labels positive."""

@@ -620,6 +620,61 @@ class TestDirectedGraphModelBase:
         with pytest.raises(ValueError, match="needs a 'scale' head"):
             model._flexible_parametrization(norm_var, torch.nn.Linear(4, 3))
 
+    def test_flexible_parametrization_copy_matches_first(self):
+        """`second='copy'` gives the scale its own head of the same shape."""
+        import torch.distributions as dist
+        from torch_concepts.nn.modules.mid.variable import ConceptVariable
+        model = self._graph_model()
+        norm_var = ConceptVariable("v", distribution=dist.Normal, size=3)
+        first = torch.nn.Linear(4, 3)
+
+        param = model._flexible_parametrization(norm_var, first, second="copy")
+
+        assert set(param) == {"loc", "scale"}
+        assert param["loc"] is first
+        assert param["scale"][0] is not first          # a copy, not the same module
+        scale = param["scale"](torch.randn(6, 4))
+        assert scale.shape == (6, 3)
+        assert bool((scale > 0).all())
+
+    def test_flexible_parametrization_copy_of_a_layer_starts_from_its_weights(self):
+        """Copying a *built* layer duplicates its weights, so the two heads start
+        out agreeing and diverge once their gradients differ."""
+        import torch.distributions as dist
+        from torch_concepts.nn.modules.mid.variable import ConceptVariable
+        model = self._graph_model()
+        norm_var = ConceptVariable("v", distribution=dist.Normal, size=3)
+        first = torch.nn.Linear(4, 3)
+
+        param = model._flexible_parametrization(norm_var, first, second="copy")
+        copied = param["scale"][0]
+
+        assert torch.equal(first.weight, copied.weight)
+        assert first.weight is not copied.weight       # independent tensors
+        first(torch.randn(2, 4)).sum().backward()
+        assert copied.weight.grad is None              # no shared gradient
+
+    def test_flexible_parametrization_copy_of_a_lazy_head_is_independent(self):
+        """An unbuilt LazyConstructor is copied unbuilt, so the CPD builds each
+        head separately — sized per parameter and initialized independently."""
+        import torch.distributions as dist
+        from torch_concepts.nn.modules.mid.variable import ConceptVariable, EmbeddingVariable
+        from torch_concepts.distributions import Delta
+        from torch_concepts.nn import LazyConstructor, LinearEmbeddingToConcept, ParametricCPD
+        model = self._graph_model()
+        parent = EmbeddingVariable("x", distribution=Delta, size=6)
+        norm_var = ConceptVariable("v", distribution=dist.Normal, size=3)
+
+        param = model._flexible_parametrization(
+            norm_var, LazyConstructor(LinearEmbeddingToConcept), second="copy"
+        )
+        cpd = ParametricCPD(norm_var, parents=[parent], parametrization=param)
+
+        loc = [p for _, p in cpd.parametrization["loc"].named_parameters()]
+        scale = [p for _, p in cpd.parametrization["scale"].named_parameters()]
+        assert loc and len(loc) == len(scale)
+        assert not any(torch.equal(a, b) for a, b in zip(loc, scale))
+
     def test_flexible_parametrization_auto_is_ignored_for_discrete(self):
         """A caller can pass a `second` for every variable: only a continuous
         one has a second parameter to put it in."""
