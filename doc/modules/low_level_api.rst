@@ -53,7 +53,7 @@ Predictors
    CallableConceptToConcept
    HyperlinearConceptEmbeddingToConcept
    MixConceptEmbeddingToConcept
-   MixConceptEmbedding
+   MixConceptEmbeddings
 
 Dense Layers
 ------------
@@ -76,6 +76,7 @@ Priors
 
    LearnablePrior
    FixedPrior
+   TiedPrior
 
 Activations
 -----------
@@ -85,6 +86,7 @@ Activations
    :nosignatures:
 
    TrilActivation
+   GlobalScale
 
 Graph Learners
 --------------
