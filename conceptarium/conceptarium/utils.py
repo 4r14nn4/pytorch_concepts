@@ -6,7 +6,6 @@ This module provides helper functions for:
 - Dynamic class loading and instantiation
 - Managing concept annotations and distributions
 """
-import math
 import os
 import torch
 import logging
@@ -169,18 +168,13 @@ def attach_latent_encoder(cfg: DictConfig, backbone: nn.Module) -> nn.Module:
 
 def update_config_from_data(cfg: DictConfig, dm: ConceptDataModule) -> DictConfig:
     """Update model configuration from datamodule properties.
-
-    Sets ``model.input_size`` from the data, and publishes ``data_dims``
-    (``n_pixels``, ``n_concepts``) for configs to interpolate — a generative
-    decoder is sized from both, and neither is known before the datamodule is
-    built.
-
+    
     Args:
         cfg: Hydra DictConfig containing model configuration.
         dm: ConceptDataModule instance with dataset information.
-
+        
     Returns:
-        The updated cfg.
+        Updated cfg
     """
     with open_dict(cfg):
         cfg.model.model_cls.update(
