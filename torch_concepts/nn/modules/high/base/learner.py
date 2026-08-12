@@ -296,6 +296,14 @@ class BaseLearner(pl.LightningModule):
         """
         return {"input": inputs["x"]}
 
+    def default_extra(self, evidence):
+        """Extra context merged into ``out.extra`` for loss terms that need
+        more than params/target — e.g. :class:`~torch_concepts.nn.ReconstructionLoss`
+        reads the observed value from ``out.extra['evidence']``. ``None`` by
+        default (nothing merged); override in a learner whose loss needs it.
+        """
+        return None
+
     def shared_step(self, batch, step):
         """Shared logic for train/val/test steps.
 
@@ -332,10 +340,9 @@ class BaseLearner(pl.LightningModule):
         evidence = self.default_evidence(inputs)
         out = self.forward(query=query, evidence=evidence)
 
-        # Publish the observed values so a loss term can score them. A generative
-        # term (e.g. ReconstructionLoss) needs the *observed* variable, which is
-        # in the evidence rather than in the concept target.
-        out.extra = {**(out.extra or {}), "evidence": evidence}
+        extra = self.default_extra(evidence)
+        if extra:
+            out.extra = {**(out.extra or {}), **extra}
 
         target = self.prepare_target(c_loss)
 
@@ -379,8 +386,14 @@ class BaseLearner(pl.LightningModule):
         After the backward pass, not at the end of ``training_step``: the
         temperature is part of the forward graph and is updated in place, so
         mutating it earlier would invalidate the graph autograd is about to walk.
+
+        A model with no PGM/inference engine (e.g.
+        :class:`~torch_concepts.nn.BlackBox`) never sets these attributes at
+        all, so they are read with a ``None`` default rather than assumed
+        present.
         """
-        engines = {id(e): e for e in (self.train_inference, self.eval_inference) if e}
+        candidates = (getattr(self, "train_inference", None), getattr(self, "eval_inference", None))
+        engines = {id(e): e for e in candidates if e}
         for engine in engines.values():
             engine.temperature_step()
 
