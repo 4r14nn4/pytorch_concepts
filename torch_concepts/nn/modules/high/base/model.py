@@ -393,10 +393,7 @@ class BaseModel(nn.Module, ABC):
         """Build the per-concept state-embedding variable(s), aligned with the concepts.
 
         Each concept contributes ``cardinality`` state embeddings of width
-        ``embedding_size``. A binary concept therefore contributes a single row:
-        its second context :math:`w^-` is derived from the first inside
-        :class:`~torch_concepts.nn.MixConceptEmbeddingToConcept`, not encoded here.
-        This uses the **same** :meth:`_plate_layout` as
+        ``embedding_size``. This uses the **same** :meth:`_plate_layout` as
         :meth:`build_concept_variables`, so — called with the same ``names`` — the
         returned list aligns element-by-element with the concept variables: group
         ``i``'s embeddings feed group ``i``'s concepts. Per group it returns:

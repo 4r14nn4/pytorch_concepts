@@ -146,12 +146,6 @@ class DirectedGraphModel(GraphModel, ABC):
     def _flexible_parametrization(self, variable, first, second=None, activate=True):
         """Build a ``ParametricCPD`` parametrization dict from ``variable``'s distribution.
 
-        The dict's keys are the distribution's parameter names, taken from
-        ``variable.param_sizes``: a single ``"probs"``/``"logits"`` (discrete, as
-        set by :attr:`param_for_discrete_var`) or ``"value"`` (Delta) from
-        ``first``; or ``"loc"`` from ``first`` plus ``"scale"``/``"scale_tril"``
-        from ``second`` (continuous).
-
         Parameters
         ----------
         variable : Variable
