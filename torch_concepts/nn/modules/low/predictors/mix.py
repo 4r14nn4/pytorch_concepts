@@ -54,7 +54,7 @@ class MixConceptEmbeddings(nn.Module):
         self.binary_mask = torch.from_numpy(np.array(in_concepts.types) != 'continuous')
         cumsum = torch.cumsum(self.cardinalities_expanded, dim=0)
         start_positions = cumsum - self.cardinalities_expanded
-        bernoulli_mask = self.cardinalities_expanded == 1 & self.binary_mask
+        bernoulli_mask = (self.cardinalities_expanded == 1) & self.binary_mask
         self.mask_cardinality_1 = start_positions[bernoulli_mask]
         self.cardinalities_expanded[bernoulli_mask] = 2
 
