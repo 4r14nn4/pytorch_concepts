@@ -41,9 +41,6 @@ def main():
         variables=[x, concepts, xor, y1],
         factors=[
             ParametricCPD(x, parents=[], parametrization=LearnablePrior(X)),
-            # A CPD applies no activation, so each head is a raw layer composed
-            # with `DefaultActivation`: it reads the standard squashing function
-            # for that parameter off the variable's distribution family.
             ParametricCPD(concepts, parents=[x], parametrization=Sequential(
                 LinearEmbeddingToConcept(in_embeddings=X, out_concepts=concepts.size),
                 DefaultActivation(concepts, "probs"))),
