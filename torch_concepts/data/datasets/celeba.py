@@ -50,17 +50,10 @@ class CelebADataset(ConceptDataset):
         root: Root directory where the dataset is stored or will be downloaded.
         concept_subset: Optional subset of concept labels to use.
         label_descriptions: Optional dict mapping concept names to descriptions.
-        image_size: Optional square side to deliver images at. ``None`` (the
-            default) keeps the native 218x178. When set, each image is
-            centre-cropped to its shorter side and resized to
-            ``(image_size, image_size)`` — the usual CelebA preparation, and what
-            makes the images usable by a generative decoder, whose output width
-            grows with the pixel count (116,412 at native resolution).
+        image_size: When set, each image is centre-cropped to its shorter side and 
+            resized to ``(image_size, image_size)``. 
+            ``None`` (the default) keeps the native 218x178.
     """
-
-    #: Class-level default so instances built without ``__init__`` (offline test
-    #: fixtures use ``__new__``) still read as "native resolution".
-    image_size: Optional[int] = None
 
     def __init__(
         self,

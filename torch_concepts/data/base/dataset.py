@@ -456,12 +456,6 @@ class ConceptDataset(Dataset):
         """If ``concept_names_subset`` is provided, the annotations are reduced
         to include only the specified concepts.
 
-        Delegates to :meth:`~torch_concepts.annotations.Annotations.subset`, which
-        validates the requested labels and slices every per-concept field. Notably
-        it returns *lists*: :meth:`set_concepts` and :meth:`set_graph` index a
-        ``pd.DataFrame`` by :attr:`concept_names`, and pandas reads a **tuple** as a
-        single MultiIndex key rather than a list of columns.
-
         Args:
             annotations: Annotations object for all concepts.
             concept_names_subset: List of strings naming the subset of concepts to use.
