@@ -248,22 +248,23 @@ class TestCBMEdgeCases(unittest.TestCase):
     """Test CBM edge cases and error handling."""
     
     def test_empty_query(self):
-        """Test behavior with empty query."""
+        """An empty query asks for nothing and gets nothing back, without error."""
         ann = Annotations(
                 labels=['c1', 'c2'],
                 cardinalities=[1, 1],
             )
-        
+
         model = ConceptBottleneckModel(
             input_size=8,
             annotations=ann,
             task_names=['c2']
         )
-        
+
         x = torch.randn(2, 8)
-        # Empty or None query should handle gracefully
-        # Behavior depends on implementation
-    
+        out = model(query=[], input=x)
+        self.assertEqual(out.params, {})
+        self.assertIsNone(out.logits)
+
     def test_repr(self):
         """Test string representation."""
         ann = Annotations(
@@ -278,7 +279,8 @@ class TestCBMEdgeCases(unittest.TestCase):
         )
 
         repr_str = repr(model)
-        self.assertIsInstance(repr_str, str)
+        self.assertIn(type(model).__name__, repr_str)
+        self.assertIn('n_concepts=2', repr_str)
 
 
 # =============================================================================
@@ -510,17 +512,29 @@ class TestGraphCBMConstruction:
         assert hasattr(model, 'pgm')
 
     def test_build_encoder_is_called(self):
+        """`build_encoder` (LinearEmbeddingToConcept) heads the root node ('a',
+        no parents in the graph); `build_predictor` heads nodes with parents."""
         ann = _make_graph_cbm_ann()
         graph = _make_dag()
         model = GraphConceptBottleneckModel(input_size=4, annotations=ann, graph=graph)
-        # The model builds encoders for root nodes (just 'a')
-        assert hasattr(model, 'pgm')
+        from torch_concepts.nn import LinearEmbeddingToConcept
+
+        head = model.pgm.factors['a'].parametrization['logits']
+        assert isinstance(head, LinearEmbeddingToConcept)
+        assert head.encoder.in_features == model.latent_size
+        assert head.encoder.out_features == 1
 
     def test_build_predictor_is_called(self):
         ann = _make_graph_cbm_ann()
         graph = _make_dag()
         model = GraphConceptBottleneckModel(input_size=4, annotations=ann, graph=graph)
-        assert hasattr(model, 'inference')
+        from torch_concepts.nn import LinearConceptToConcept
+
+        for name in ('b', 'c'):  # both have exactly one parent, cardinality 1
+            head = model.pgm.factors[name].parametrization['logits']
+            assert isinstance(head, LinearConceptToConcept)
+            assert head.predictor.in_features == 1
+            assert head.predictor.out_features == 1
 
     def test_forward_basic(self):
         ann = _make_graph_cbm_ann()
@@ -529,7 +543,42 @@ class TestGraphCBMConstruction:
         model.eval()
         x = torch.randn(3, 4)
         out = model.forward(query=['a', 'b', 'c'], input=x)
-        assert out is not None
+        for name in ('a', 'b', 'c'):
+            assert out.logits[name].shape == (3, 1)
+
+    def test_gradients_flow_through_the_graph(self):
+        """A downstream node's loss must backprop through its parent's head all
+        the way to the input -- the chain build_encoder -> build_predictor(s)
+        wires up correctly, not just each head in isolation."""
+        ann = _make_graph_cbm_ann()
+        graph = _make_dag()
+        model = GraphConceptBottleneckModel(input_size=4, annotations=ann, graph=graph)
+        model.train()
+        x = torch.randn(3, 4, requires_grad=True)
+        out = model(query=['a', 'b', 'c'], input=x)
+        out.logits['c'].sum().backward()
+        assert x.grad is not None and torch.isfinite(x.grad).all()
+        for name in ('a', 'b', 'c'):
+            head = model.pgm.factors[name].parametrization['logits']
+            assert any(p.grad is not None for p in head.parameters())
+
+    def test_categorical_concepts_forward(self):
+        """Nodes with cardinality > 1 (not just binary) must produce a
+        per-name (batch, cardinality) logits slice at each graph position,
+        including a parent->child edge between two different cardinalities."""
+        ann = Annotations(
+            labels=['a', 'b', 'c'],
+            cardinalities=[3, 1, 2],
+            types=['categorical', 'binary', 'categorical'],
+        )
+        graph = _make_dag()
+        model = GraphConceptBottleneckModel(input_size=4, annotations=ann, graph=graph)
+        model.eval()
+        x = torch.randn(3, 4)
+        out = model(query=['a', 'b', 'c'], input=x)
+        assert out.logits['a'].shape == (3, 3)
+        assert out.logits['b'].shape == (3, 1)
+        assert out.logits['c'].shape == (3, 2)
 
 
 # ===========================================================================

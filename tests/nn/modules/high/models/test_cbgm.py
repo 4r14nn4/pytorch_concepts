@@ -26,8 +26,8 @@ pytest.importorskip("pyro", reason="CBGM's default inference engine needs pyro-p
 INPUT_SIZE, LATENT_SIZE, EMBEDDING_SIZE = 24, 8, 4
 
 
-def build_model(annotations, plate=None):
-    n_contexts = len(annotations.labels) + 1
+def build_model(annotations, plate=None, use_unknown=True, **kwargs):
+    n_contexts = len(annotations.labels) + (1 if use_unknown else 0)
     return ConceptBottleneckGenerativeModel(
         input_size=INPUT_SIZE,
         annotations=annotations,
@@ -38,6 +38,8 @@ def build_model(annotations, plate=None):
         embedding_size=EMBEDDING_SIZE,
         observation=Bernoulli,
         plate=plate,
+        use_unknown=use_unknown,
+        **kwargs,
     )
 
 
@@ -235,6 +237,62 @@ class TestBinaryStateEmbeddings:
         grads = [p.grad for p in emb_cpd.parameters()]
         assert grads and all(g is not None for g in grads)
         assert any(g.abs().sum() > 0 for g in grads)
+
+
+class TestUseUnknownAblation:
+    """``use_unknown=False`` is Table 3's ablation: the unsupervised context is
+    left out of the graph entirely, shrinking the bottleneck from ``(k+1)*m`` to
+    ``k*m``."""
+
+    def test_unknown_variable_is_absent_from_the_graph(self, binary_annotations):
+        model = build_model(binary_annotations, plate=False, use_unknown=False)
+        assert "unknown" not in model.pgm.variables
+        assert "unknown" not in model.pgm.factors
+
+    def test_mixing_stays_k_wide_without_the_unknown_context(self, binary_annotations):
+        model = build_model(binary_annotations, plate=False, use_unknown=False)
+        n_concepts = len(binary_annotations.labels)
+        assert tuple(model.pgm.variables["mixing"].shape) == (n_concepts, EMBEDDING_SIZE)
+
+    def test_forward_and_backward_through_the_shrunk_bottleneck(self, binary_annotations):
+        """A decoder sized for k*m (not (k+1)*m) must still receive a
+        matching-width bottleneck, and gradients must still reach it."""
+        model = build_model(binary_annotations, plate=False, use_unknown=False)
+        out = model(query=list(model.pgm.variables), input=torch.rand(6, INPUT_SIZE))
+        assert out.probs["input"].shape == (6, INPUT_SIZE)
+        out.probs["input"].sum().backward()
+        assert any(p.grad is not None for p in model.decoder.parameters())
+
+
+class TestContextNetwork:
+    """``context_hidden_size`` swaps the ``z -> embeddings`` heads from
+    :class:`LinearEmbeddingEncoder` to :class:`MLPEmbeddingEncoder`;
+    ``context_norm`` only makes sense alongside it."""
+
+    def test_context_norm_without_hidden_size_raises(self, binary_annotations):
+        with pytest.raises(ValueError):
+            build_model(binary_annotations, plate=False, context_norm="layer")
+
+    def test_context_hidden_size_swaps_in_the_mlp_encoder(self, binary_annotations):
+        """`context_hidden_size` alone (default `context_norm=None`) must
+        build without error."""
+        from torch_concepts.nn import MLPEmbeddingEncoder, LinearEmbeddingEncoder
+
+        model = build_model(binary_annotations, plate=False, context_hidden_size=8)
+        assert any(isinstance(m, MLPEmbeddingEncoder) for m in model.modules())
+        assert not any(isinstance(m, LinearEmbeddingEncoder) for m in model.modules())
+
+    def test_context_hidden_size_and_norm_forward_and_backward(self, binary_annotations):
+        model = build_model(
+            binary_annotations, plate=False,
+            context_hidden_size=8, context_norm="layer",
+        )
+        out = model(query=list(model.pgm.variables), input=torch.rand(6, INPUT_SIZE))
+        assert out.probs["input"].shape == (6, INPUT_SIZE)
+        out.probs["input"].sum().backward()
+        emb_cpd = model.pgm.factors["a_embedding"]
+        grads = [p.grad for p in emb_cpd.parameters()]
+        assert grads and all(g is not None for g in grads)
 
 
 class TestNormalObservation:
