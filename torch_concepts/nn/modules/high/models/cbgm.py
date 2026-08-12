@@ -36,7 +36,7 @@ import torch_concepts as pyc
 from .....annotations import Annotations
 from .....concept_graph import ConceptGraph
 from .....distributions import Delta
-from ...low.dense_layers import LinearEmbeddingEncoder, NonLinearEmbeddingEncoder
+from ...low.dense_layers import LinearEmbeddingEncoder, MLPEmbeddingEncoder
 from ...low.encoders.linear import LinearEmbeddingToConcept
 from ...low.predictors.mix import MixConceptEmbeddings
 from ...low.priors import FixedPrior
@@ -98,11 +98,11 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
         whole path ``z -> pixels`` close to affine, and an affine generator
         reproduces the data mean near the codes it was trained on and diverges
         away from them — sharp reconstructions, incoherent prior samples. Set it
-        to swap in :class:`~torch_concepts.nn.NonLinearEmbeddingEncoder`.
-    context_norm : str, default 'none'
+        to swap in :class:`~torch_concepts.nn.MLPEmbeddingEncoder`.
+    context_norm : str or None, default None
         Normalisation on the context embeddings: ``'layer'``, ``'batch'`` or
-        ``'none'``. Only meaningful alongside ``context_hidden_size`` — passing
-        it alone raises rather than being dropped, since a
+        ``None`` for none. Only meaningful alongside ``context_hidden_size`` —
+        passing it alone raises rather than being dropped, since a
         ``LinearEmbeddingEncoder`` takes no normalisation. The reference uses
         ``BatchNorm1d``, which bounds the embeddings when ``z`` wanders off the
         posterior; ``'layer'`` does the same without depending on the batch, so
@@ -217,7 +217,7 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
         embedding_size: int = 16,
         use_unknown: bool = True,
         context_hidden_size: Optional[int] = None,
-        context_norm: str = "none",
+        context_norm: Optional[str] = None,
         observation: Type = Normal,
         global_scale: bool = True,
         scale_init: float = 1.0,
@@ -242,7 +242,7 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
         self.use_unknown = bool(use_unknown)
         self.context_hidden_size = context_hidden_size
         self.context_norm = context_norm
-        if context_hidden_size is None and context_norm != "none":
+        if context_hidden_size is None and context_norm is not None:
             raise ValueError(
                 f"{type(self).__name__}: `context_norm={context_norm!r}` needs "
                 "`context_hidden_size` too. Without it the context networks are "
@@ -414,7 +414,7 @@ class ConceptBottleneckGenerativeModel(DirectedGraphModel):
                     out_features=self.embedding_size,
                     n_embeddings=n_embeddings,
                 )
-            return NonLinearEmbeddingEncoder(
+            return MLPEmbeddingEncoder(
                 in_features=self.latent_size,
                 out_features=self.embedding_size,
                 n_embeddings=n_embeddings,

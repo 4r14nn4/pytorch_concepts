@@ -36,7 +36,7 @@ Encoders
 
    LinearEmbeddingToConcept
    LinearEmbeddingEncoder
-   NonLinearEmbeddingEncoder
+   MLPEmbeddingEncoder
    SelectorEmbeddingEncoder
    ConceptWhitening
    WhitenedEmbeddingToConcept
