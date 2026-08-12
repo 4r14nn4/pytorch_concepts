@@ -186,8 +186,4 @@ def update_config_from_data(cfg: DictConfig, dm: ConceptDataModule) -> DictConfi
         cfg.model.model_cls.update(
             input_size = dm.n_features[-1] if len(dm.n_features)==1 else dm.n_features,
         )
-        cfg.data_dims = {
-            "n_pixels": int(math.prod(dm.n_features)),
-            "n_concepts": len(dm.annotations.labels),
-        }
     return cfg
