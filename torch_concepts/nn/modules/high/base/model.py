@@ -712,15 +712,15 @@ class BaseModel(nn.Module, ABC):
         query = {}
         for name, segments in self._query_segments.items():
             if len(segments) == 1 and segments[0][0] == 'plain':
-                query[name] = raw[:, segments[0][1]].float()
+                query[name] = raw[..., segments[0][1]].float()
                 continue
             pieces = []
             for kind, payload in segments:
                 if kind == 'plain':
-                    pieces.append(raw[:, payload].float())
+                    pieces.append(raw[..., payload].float())
                 else:
                     i, card = payload
-                    pieces.append(F.one_hot(raw[:, i].long(), card).float())
+                    pieces.append(F.one_hot(raw[..., i].long(), card).float())
             query[name] = torch.cat(pieces, dim=-1)
         return query
 

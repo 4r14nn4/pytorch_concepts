@@ -349,6 +349,12 @@ class ConceptLoss(TypeAwareLoss):
         """
         cards = list(cat_logits.annotation.cardinalities)
 
+        # Unwrap to plain tensors and fold any leading (batch-like) dimensions
+        # into one batch axis, so the layout below is always (batch, width).
+        # Both are flattened the same way, so their rows stay aligned.
+        cat_logits = getattr(cat_logits, "tensor", cat_logits).reshape(-1, cat_logits.shape[-1])
+        cat_target = getattr(cat_target, "tensor", cat_target).reshape(-1, cat_target.shape[-1])
+
         # The padding layout (max width and which columns are real per concept)
         # depends only on the cardinalities, so cache it per cardinality signature.
         key = tuple(cards)
