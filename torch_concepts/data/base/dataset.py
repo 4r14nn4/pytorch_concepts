@@ -70,6 +70,12 @@ class ConceptDataset(Dataset):
         >>> len(dataset)
         100
     """
+
+    # Set by ``ConceptDataModule(max_samples=...)``: the rows are a random draw,
+    # and which draw (None = from the global RNG, so not reproducible).
+    is_subset: bool = False
+    subset_seed: Optional[int] = None
+
     def __init__(
         self,
         input_data: Union[np.ndarray, pd.DataFrame, Tensor],
@@ -373,12 +379,13 @@ class ConceptDataset(Dataset):
         embeddings and ``embs_precomputed`` is True, so ``__getitem__`` serves
         embeddings.
 
-        With ``cache=True`` (default) the embeddings are persisted to
-        ``{root_dir}/{backbone.filename}`` and loaded from there on subsequent
-        calls instead of recomputing. Use ``force=True`` to force recomputing 
-        embeddings even if a cache file exists.
+        With ``cache=True`` (default) the embeddings are persisted under
+        ``cache_dir`` (by default ``root_dir``) and reloaded on later calls;
+        ``force=True`` recomputes anyway. The file name identifies the rows it
+        covers -- e.g. ``bkb_embs_resnet18_n4000_seed7.pt`` -- so the full
+        dataset and each ``max_samples`` subset keep separate caches. An
+        unseeded subset redraws its rows every run, and is never cached.
 
-        
         Parameters
         ----------
         backbone : Backbone
@@ -390,8 +397,7 @@ class ConceptDataset(Dataset):
             DataLoader workers for the extraction pass.
         cache : bool, default True
             Persist the embeddings to disk and reuse them across calls. Pass
-            False to compute in memory only (e.g. on a dataset subset, to
-            avoid writing a subset-sized cache into a shared ``root_dir``).
+            False to compute in memory only.
         cache_dir : str, optional
             Directory for the cache file. Defaults to the dataset's
             ``root_dir``; set it when the data lives on read-only/shared
@@ -400,11 +406,23 @@ class ConceptDataset(Dataset):
             Recompute even if a cache file exists.
         """
         embs = None
+        if cache and self.is_subset and self.subset_seed is None:
+            warnings.warn(
+                "Embeddings of an unseeded subset are not cached: its rows are "
+                "redrawn every run. Pass `seed` to the datamodule to make the "
+                "subset -- and its cache -- reproducible."
+            )
+            cache = False
         if cache:
             if cache_dir is None:
                 cache_dir = self.root_dir
             os.makedirs(cache_dir, exist_ok=True)
-            cache_path = os.path.join(cache_dir, backbone.filename)
+            # Key the cache by the rows it holds, so no two sets share a file.
+            stem, ext = os.path.splitext(backbone.filename)
+            stem += f"_n{self.n_samples}"
+            if self.is_subset:
+                stem += f"_seed{self.subset_seed}"
+            cache_path = os.path.join(cache_dir, stem + ext)
             if os.path.exists(cache_path) and not force:
                 logger.info(f"Loading cached embeddings from {cache_path}")
                 embs = torch.load(cache_path)
