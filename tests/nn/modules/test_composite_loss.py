@@ -12,7 +12,7 @@ import torch.nn.functional as F
 
 from torch_concepts.annotations import Annotations
 from torch_concepts.nn import CompositeLoss, ConceptLoss, NLLProbLoss
-from torch_concepts.nn.modules.loss import TypeAwareLoss
+from torch_concepts.nn.modules.loss import PyCLoss
 from torch_concepts.nn.modules.outputs import ModelOutput
 from torch_concepts.tensor import AnnotatedTensor
 
@@ -25,7 +25,7 @@ def annotated(tensor, labels, cardinalities, types):
     )
 
 
-class OutputOnlyTerm(TypeAwareLoss):
+class OutputOnlyTerm(PyCLoss):
     """A term whose ``forward`` takes the output alone, like
     ``WeightedConceptLoss`` — the other half of ``CompositeLoss``'s signature
     dispatch."""
@@ -106,7 +106,7 @@ class TestCompositeLoss:
             CompositeLoss(terms=[])
 
     def test_it_is_a_type_aware_loss_so_the_learner_accepts_it(self):
-        assert isinstance(CompositeLoss(terms=[OutputOnlyTerm()]), TypeAwareLoss)
+        assert isinstance(CompositeLoss(terms=[OutputOnlyTerm()]), PyCLoss)
 
 
 class TestUnsupervisedVariablesAreSkipped:

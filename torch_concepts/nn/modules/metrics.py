@@ -7,7 +7,7 @@ from copy import deepcopy
 
 from ...annotations import Annotations
 from .outputs import CONTINUOUS_QUANTITIES, ModelOutput, supervised_subset
-from .utils import GroupConfig, check_collection
+from .utils import by_type, check_collection
 
 
 def clone_metric(metric):
@@ -84,7 +84,7 @@ class ConceptMetrics(nn.Module):
         self.groups = annotations.type_groups
 
         # Validate and filter metrics configuration
-        fn_collection = GroupConfig(binary=binary, categorical=categorical, continuous=continuous)
+        fn_collection = by_type(binary, categorical, continuous)
         self.fn_collection = check_collection(annotations, fn_collection, 'metrics')
 
         # Pre-compute max cardinality for categorical concepts

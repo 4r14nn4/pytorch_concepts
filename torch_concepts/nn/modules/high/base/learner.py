@@ -23,7 +23,7 @@ from pytorch_lightning.utilities.types import Optimizer, LRScheduler
 
 from .....tensor import AnnotatedTensor
 from ...metrics import ConceptMetrics
-from ...loss import TypeAwareLoss
+from ...loss import PyCLoss
 from ...outputs import CONTINUOUS_QUANTITIES, ModelOutput, ParamsDict
 
 
@@ -45,7 +45,7 @@ class BaseLearner(pl.LightningModule):
 
     Example:
         >>> from torch_concepts.nn.modules.high.base.learner import BaseLearner
-        >>> from torch_concepts.nn.modules.metrics import ConceptMetrics, GroupConfig
+        >>> from torch_concepts.nn.modules.metrics import ConceptMetrics
         >>> learner = BaseLearner(loss=None, metrics=None)
     """
     def __init__(self,
@@ -60,10 +60,10 @@ class BaseLearner(pl.LightningModule):
     ):
         super(BaseLearner, self).__init__(**kwargs)
 
-        # loss function. Only a TypeAwareLoss (e.g. ConceptLoss), which consumes
+        # loss function. Only a PyCLoss (e.g. ConceptLoss), which consumes
         # the whole ModelOutput, is supported.
         self.loss = loss
-        self._loss_takes_model_output = isinstance(loss, TypeAwareLoss)
+        self._loss_takes_model_output = isinstance(loss, PyCLoss)
 
         # optimizer and scheduler
         self.optim_class = optim_class
@@ -350,7 +350,7 @@ class BaseLearner(pl.LightningModule):
         if self.loss is not None:
             if not self._loss_takes_model_output:
                 raise NotImplementedError(
-                    "Only a TypeAwareLoss (e.g. ConceptLoss) is supported; a plain "
+                    "Only a PyCLoss (e.g. ConceptLoss) is supported; a plain "
                     "loss(input, target) is not."
                 )
             loss = self.loss(out, target)
