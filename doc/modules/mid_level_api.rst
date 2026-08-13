@@ -33,6 +33,7 @@ Factors
 
    ParametricFactor
    ParametricCPD
+   ParametricPotential
 
 Activations
 -----------
@@ -56,6 +57,8 @@ Probabilistic Models
 
    ProbabilisticModel
    BayesianNetwork
+   MarkovNetwork
+   ChainGraph
 
 Inference
 ---------
