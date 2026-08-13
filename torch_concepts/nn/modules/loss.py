@@ -1,12 +1,13 @@
 """Loss functions for concept-based models."""
 import inspect
 import warnings
-from typing import List, Mapping, Optional, Union
+from typing import List, Optional, Union
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from .utils import GroupConfig
-from .outputs import ModelOutput
+from .outputs import ModelOutput, supervised_subset
 from ...utils import instantiate_from_string
 from ...concept_graph import ConceptGraph
 
@@ -81,6 +82,101 @@ class TypeAwareLoss(nn.Module):
     rather than a plain ``loss(input, target)``. The learner uses this to route
     the model output to the loss.
     """
+
+
+class CompositeLoss(TypeAwareLoss):
+    """Weighted sum of any number of :class:`TypeAwareLoss` terms.
+
+    The building block for objectives that are not a single concept term — an
+    ELBO, for instance, is a reconstruction term plus a KL term plus whatever
+    supervision and regularisation the model adds. Each term is handed the same
+    :class:`ModelOutput`, so terms stay independent and reusable.
+
+    Every term is called with ``target`` only if its ``forward`` accepts one
+    (``WeightedConceptLoss`` and ``DepthWeightedConceptLoss`` take the output
+    alone), so terms with either signature compose freely.
+
+    Args:
+        terms (list of nn.Module): The loss terms to sum.
+        weights (list of float, optional): Per-term weights. Defaults to all
+            ``1.0``.
+
+    Example:
+        >>> from torch_concepts.nn import CompositeLoss, ConceptLoss
+        >>> loss_fn = CompositeLoss(
+        ...     terms=[ConceptLoss(binary=torch.nn.BCEWithLogitsLoss())],
+        ...     weights=[1.0],
+        ... )
+    """
+
+    def __init__(
+        self,
+        terms: Union[nn.Module, List[nn.Module]],
+        weights: Optional[List[float]] = None,
+    ):
+        super().__init__()
+        terms, weights = _normalize_loss_terms(terms, weights)
+        if not terms:
+            raise ValueError("CompositeLoss: `terms` must not be empty.")
+        self.terms = nn.ModuleList(terms)
+        self.weights = list(weights)
+        self._takes_target = [
+            "target" in sig or has_var_kw
+            for sig, has_var_kw in (_get_forward_signature(t) for t in terms)
+        ]
+
+    def __repr__(self) -> str:
+        parts = [
+            f"{w}*{t.__class__.__name__}" if w != 1.0 else t.__class__.__name__
+            for t, w in zip(self.terms, self.weights)
+        ]
+        return f"{self.__class__.__name__}({' + '.join(parts)})"
+
+    def forward(self, output: ModelOutput, target=None) -> torch.Tensor:
+        total = None
+        for term, weight, takes_target in zip(
+            self.terms, self.weights, self._takes_target
+        ):
+            value = term(output, target) if takes_target else term(output)
+            contribution = weight * value
+            total = contribution if total is None else total + contribution
+        return total
+
+
+class NLLProbLoss(nn.Module):
+    """Categorical negative log-likelihood for a model that reports ``probs``.
+
+    ``CrossEntropyLoss`` expects logits and ``NLLLoss`` expects log-probabilities,
+    so neither can score a head that already emits normalised probabilities.
+    This takes the log first, with a floor so a zero probability does not become
+    ``-inf``. Use it as the ``categorical`` term of a
+    :class:`ConceptLoss` configured with ``categorical_param='probs'``.
+
+    Args:
+        eps (float): Lower bound applied before the log. Default ``1e-8``.
+
+    Example:
+        >>> from torch_concepts.nn import ConceptLoss, NLLProbLoss
+        >>> loss_fn = ConceptLoss(categorical=NLLProbLoss(),
+        ...                       categorical_param='probs')
+    """
+
+    def __init__(self, eps: float = 1e-8):
+        super().__init__()
+        self.eps = eps
+
+    def extra_repr(self) -> str:
+        return f"eps={self.eps}"
+
+    def forward(
+        self,
+        input: torch.Tensor,
+        target: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # Padded columns arrive as -inf (see ConceptLoss._prepare_categorical);
+        # clamp_min lifts them to eps, and their target is never that class.
+        return F.nll_loss(input.clamp_min(self.eps).log(), target.long())
 
 
 class ConceptLoss(TypeAwareLoss):
@@ -253,6 +349,12 @@ class ConceptLoss(TypeAwareLoss):
         """
         cards = list(cat_logits.annotation.cardinalities)
 
+        # Unwrap to plain tensors and fold any leading (batch-like) dimensions
+        # into one batch axis, so the layout below is always (batch, width).
+        # Both are flattened the same way, so their rows stay aligned.
+        cat_logits = getattr(cat_logits, "tensor", cat_logits).reshape(-1, cat_logits.shape[-1])
+        cat_target = getattr(cat_target, "tensor", cat_target).reshape(-1, cat_target.shape[-1])
+
         # The padding layout (max width and which columns are real per concept)
         # depends only on the cardinalities, so cache it per cardinality signature.
         key = tuple(cards)
@@ -284,7 +386,8 @@ class ConceptLoss(TypeAwareLoss):
 
         Each type reads its predictions from a configurable quantity
         (``binary_param`` / ``categorical_param`` / ``continuous_param``) and is
-        aligned to the target by concept name.
+        aligned to the target by concept name. Variables the target does not
+        cover are skipped (see :meth:`_supervised`).
 
         Args:
             output (ModelOutput): Structured model output containing
@@ -304,10 +407,14 @@ class ConceptLoss(TypeAwareLoss):
         # the (shared, stable) annotation, so a shared discrete quantity resolves each
         # type at most once and stays warm across forwards.
         bq = output.params.get(self.binary_param)
-        binary = bq.binary() if bq is not None else None
+        binary = supervised_subset(bq.binary() if bq is not None else None, target)
         cq = output.params.get(self.categorical_param)
-        categorical = cq.categorical() if cq is not None else None
-        continuous = output.params.get(self.continuous_param)
+        categorical = supervised_subset(
+            cq.categorical() if cq is not None else None, target
+        )
+        continuous = supervised_subset(
+            output.params.get(self.continuous_param), target
+        )
 
         contributions = []
 

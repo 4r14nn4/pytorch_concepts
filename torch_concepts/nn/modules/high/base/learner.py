@@ -296,6 +296,13 @@ class BaseLearner(pl.LightningModule):
         """
         return {"input": inputs["x"]}
 
+    def default_extra(self, evidence):
+        """Extra context merged into ``out.extra`` for loss terms that need more
+        than params/target. ``None`` by default (nothing merged); override in a
+        learner whose loss needs it, e.g. ``{'evidence': evidence}``.
+        """
+        return None
+
     def shared_step(self, batch, step):
         """Shared logic for train/val/test steps.
 
@@ -332,6 +339,10 @@ class BaseLearner(pl.LightningModule):
         evidence = self.default_evidence(inputs)
         out = self.forward(query=query, evidence=evidence)
 
+        extra = self.default_extra(evidence)
+        if extra:
+            out.extra = {**(out.extra or {}), **extra}
+
         target = self.prepare_target(c_loss)
 
         # --- Compute loss (scaled space) ---
@@ -363,6 +374,19 @@ class BaseLearner(pl.LightningModule):
         # TODO: train interventions using the context manager 'with ...'
         loss = self.shared_step(batch, step='train')
         return loss
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        """Advance the relaxation temperature once per optimiser step.
+
+        A model with no PGM/inference engine (e.g.
+        :class:`~torch_concepts.nn.BlackBox`) never sets these attributes at
+        all, so they are read with a ``None`` default rather than assumed
+        present.
+        """
+        candidates = (getattr(self, "train_inference", None), getattr(self, "eval_inference", None))
+        engines = {id(e): e for e in candidates if e}
+        for engine in engines.values():
+            engine.temperature_step()
 
     def validation_step(self, batch):
         """Validation step called by PyTorch Lightning.
