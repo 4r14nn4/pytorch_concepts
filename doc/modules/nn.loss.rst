@@ -13,4 +13,6 @@ class below document their parameters and behaviour.
    ConceptLoss
    WeightedConceptLoss
    DepthWeightedConceptLoss
+   CompositeLoss
+   NLLProbLoss
    L1LogitRegularizer

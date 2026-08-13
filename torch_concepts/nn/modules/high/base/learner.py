@@ -297,10 +297,9 @@ class BaseLearner(pl.LightningModule):
         return {"input": inputs["x"]}
 
     def default_extra(self, evidence):
-        """Extra context merged into ``out.extra`` for loss terms that need
-        more than params/target — e.g. :class:`~torch_concepts.nn.ReconstructionLoss`
-        reads the observed value from ``out.extra['evidence']``. ``None`` by
-        default (nothing merged); override in a learner whose loss needs it.
+        """Extra context merged into ``out.extra`` for loss terms that need more
+        than params/target. ``None`` by default (nothing merged); override in a
+        learner whose loss needs it, e.g. ``{'evidence': evidence}``.
         """
         return None
 

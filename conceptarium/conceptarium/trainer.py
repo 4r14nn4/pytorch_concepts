@@ -122,8 +122,7 @@ class Trainer(_Trainer_):
                 logging_interval="step",
             )
         )
-        # Extra callbacks straight from the config, e.g. a
-        # `torch_concepts.nn.LossWeightWarmup` on the KL term.
+        # Extra callbacks straight from the config.
         for callback_cfg in cfg.trainer.get("callbacks") or []:
             callbacks.append(instantiate(callback_cfg, _convert_="all"))
 
