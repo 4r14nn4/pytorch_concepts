@@ -47,8 +47,8 @@ from .modules.low.sequential import Sequential
 from .modules.low.graph.wanda import WANDAGraphLearner
 
 # Loss functions
-from .modules.loss import ConceptLoss, WeightedConceptLoss, DepthWeightedConceptLoss, \
-    L1LogitRegularizer, CompositeLoss, NLLProbLoss
+from .modules.loss import PyCLoss, ConceptLoss, ConceptSubset, WeightedConceptLoss, \
+    DepthWeightedConceptLoss, L1LogitRegularizer, CompositeLoss, NLLProbLoss
 
 # Metrics
 from .modules.metrics import ConceptMetrics, compute_cace
@@ -160,11 +160,13 @@ __all__ = [
     "WANDAGraphLearner",
 
     # Loss functions
+    "PyCLoss",
+    "CompositeLoss",
     "ConceptLoss",
+    "ConceptSubset",
     "WeightedConceptLoss",
     "DepthWeightedConceptLoss",
     "L1LogitRegularizer",
-    "CompositeLoss",
     "NLLProbLoss",
 
     # Metrics
