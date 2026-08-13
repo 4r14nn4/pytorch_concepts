@@ -1,6 +1,5 @@
 """Tests for VariationalInference (Pyro backend).
 
-All tests are skipped if pyro is not installed.
 Covers: construction, latents validation, query() output structure
 (out.params / out.guide_params), _align_param_keys, latent_names,
 guide_conditioning, and step().
@@ -9,8 +8,6 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.distributions as dist
-
-pyro = pytest.importorskip("pyro", reason="pyro not installed")
 
 from torch_concepts.nn.modules.mid.variable import ConceptVariable
 from torch_concepts.nn.modules.mid.factors.cpd import ParametricCPD

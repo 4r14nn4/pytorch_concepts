@@ -15,10 +15,7 @@ from torch_concepts.nn.modules.low.priors import FixedPrior
 from torch_concepts.nn.modules.mid.variable import ConceptVariable, EmbeddingVariable
 from torch_concepts.nn.modules.mid.factors.cpd import ParametricCPD
 from torch_concepts.nn.modules.mid.graph.bayesian_network import BayesianNetwork
-
-pytest.importorskip("pyro", reason="VariationalInference needs pyro-ppl")
-
-from torch_concepts.nn import VariationalInference  # noqa: E402
+from torch_concepts.nn import VariationalInference
 
 SIZE = 4
 
