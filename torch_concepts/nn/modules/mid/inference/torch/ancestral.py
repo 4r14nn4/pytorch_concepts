@@ -28,7 +28,7 @@ class AncestralSamplingInference(ForwardInference):
         The probabilistic graphical model to query.
     p_int : float
         Teacher-forcing probability used when a query variable has a known
-        ground-truth value.  Defaults to ``1.0`` (always teacher-force).
+        ground-truth value.  Defaults to ``0.0`` (never teacher-force).
     initial_temperature : float
         Starting temperature for relaxed-discrete samplers.  Defaults to
         ``1.0`` (uniform-ish).
@@ -51,7 +51,7 @@ class AncestralSamplingInference(ForwardInference):
     def __init__(
         self,
         pgm: BayesianNetwork,
-        p_int: float = 1.0,
+        p_int: float = 0.0,
         parallelize_levels: bool = False,
         **temperature_kwargs,
     ):

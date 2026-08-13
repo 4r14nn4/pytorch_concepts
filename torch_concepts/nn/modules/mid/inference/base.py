@@ -45,7 +45,7 @@ class BaseInference(nn.Module):
         not of a backend, and a training loop should be able to advance it
         without knowing which engine it holds (see :meth:`temperature_step`).
         Engines that never sample keep it and never read it.
-    p_int : float, default 1.0
+    p_int : float, default 0.0
         Teacher-forcing rate, applied to any variable the **query** supplies a
         value for: each leading (batch-like) element independently takes the
         ground truth with probability ``p_int`` and the engine's own realisation
@@ -80,7 +80,7 @@ class BaseInference(nn.Module):
         annealing: Union[str, Callable[[int], float]] = "constant",
         annealing_rate: float = 0.0,
         final_temperature: float = 1e-6,
-        p_int: float = 1.0,
+        p_int: float = 0.0,
     ):
         super().__init__()
         # NOTE: nn.Module.__setattr__ auto-registers ``pgm`` as a submodule, so

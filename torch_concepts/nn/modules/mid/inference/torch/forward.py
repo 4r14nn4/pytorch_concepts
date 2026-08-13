@@ -78,7 +78,7 @@ class ForwardInference(TorchBaseInference, ABC):
     def __init__(
         self,
         pgm: BayesianNetwork,
-        p_int: float = 1.0,
+        p_int: float = 0.0,
         initial_temperature: float = 1.0,
         annealing: Union[str, Callable[[int], float]] = "constant",
         annealing_rate: float = 0.0,

@@ -163,8 +163,8 @@ class PyroBaseInference(BaseInference):
         forced *stochastically* at rate ``self.p_int`` (RandInt). Such a variable
         is a **latent** site — there is nothing to pass as ``obs=`` when only
         some rows will take the ground truth — and the blend happens after the
-        draw. The caller supplies it only when ``p_int < 1``, so at the default
-        rate every site keeps the plain ``obs=`` path.
+        draw. The caller supplies it only when ``p_int < 1``; at ``p_int == 1``
+        every site keeps the plain ``obs=`` path.
         """
         pyro, _, _ = _import_pyro()
         pgm = self.pgm
