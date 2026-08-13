@@ -379,14 +379,6 @@ class BaseLearner(pl.LightningModule):
     def on_train_batch_end(self, outputs, batch, batch_idx):
         """Advance the relaxation temperature once per optimiser step.
 
-        *Both* engines, on the same schedule, so evaluation reads the temperature
-        training reached instead of sitting at the initial one — testing a
-        relaxation the model never trained at.
-
-        After the backward pass, not at the end of ``training_step``: the
-        temperature is part of the forward graph and is updated in place, so
-        mutating it earlier would invalidate the graph autograd is about to walk.
-
         A model with no PGM/inference engine (e.g.
         :class:`~torch_concepts.nn.BlackBox`) never sets these attributes at
         all, so they are read with a ``None`` default rather than assumed
