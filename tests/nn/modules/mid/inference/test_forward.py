@@ -103,10 +103,12 @@ class TestAncestralSamplingInferenceConstruction:
         eng = AncestralSamplingInference(m)
         assert eng.mode == "ancestral"
 
-    def test_default_p_int_one(self):
+    def test_default_p_int_zero(self):
+        # Every engine defaults to never teacher-forcing, so swapping one for
+        # another does not silently change the training regime.
         m = _make_simple_model()
         eng = AncestralSamplingInference(m)
-        assert eng.p_int == 1.0
+        assert eng.p_int == 0.0
 
     def test_initial_temperature_stored(self):
         m = _make_simple_model()
