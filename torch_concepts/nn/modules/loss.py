@@ -1,7 +1,7 @@
 """Loss functions for concept-based models."""
 import inspect
 import warnings
-from typing import List, Optional, Union, Dict, Sequence, Mapping
+from typing import Dict, List, Optional, Sequence, Union
 import torch
 import torch.distributions as dist
 import torch.nn.functional as F
@@ -10,6 +10,8 @@ from torch import nn
 from .utils import TYPES, by_type, check_collection
 from .outputs import CONTINUOUS_QUANTITIES, ModelOutput, supervised_subset
 from ...concept_graph import ConceptGraph
+from ...tensor import AnnotatedTensor
+from ..functional import cace_score
 
 
 def _get_forward_signature(module: nn.Module):
@@ -103,6 +105,8 @@ def subset_output(output: ModelOutput, names: List[str]) -> ModelOutput:
         present = [n for n in names if n in output.target.annotation.label_to_index]
         sub.target = output.target[present]
     for quantity, tensor in output.params.items():
+        if not hasattr(tensor, "annotation"):
+            continue
         present = [n for n in names if n in tensor.annotation.label_to_index]
         if present:
             sub.params[quantity] = tensor[present]
@@ -866,3 +870,220 @@ class L1LogitRegularizer(nn.Module):
         if mask.any():
             return self.scale * input[mask].abs().mean()
         return torch.zeros((), device=input.device)
+
+class DAGMALoss(PyCLoss):
+    """Log-determinant acyclicity penalty for a tensor or model output.
+
+    Args:
+        param: Quantity to read when the input is a :class:`ModelOutput`.
+    """
+
+    def __init__(self, param: str = "adjacency") -> None:
+        super().__init__()
+        self.param = param
+
+    def forward(self, input) -> torch.Tensor:
+        adjacency = input.params[self.param] if isinstance(input, ModelOutput) else input
+        identity = torch.eye(
+            adjacency.shape[-1], device=adjacency.device, dtype=adjacency.dtype
+        )
+        return (-torch.linalg.slogdet(identity - adjacency)[1]).abs()
+
+
+class CACELoss(PyCLoss):
+    """Inverse CACE regularizer for a model output.
+
+    Args:
+        low_param: Quantity for the low-intervention prediction.
+        high_param: Quantity for the high-intervention prediction.
+        from_logits: Apply sigmoid before computing CACE.
+        eps: Numerical floor for the inverse effect.
+    """
+
+    def __init__(
+        self,
+        low_param: str = "low_logits",
+        high_param: str = "high_logits",
+        from_logits: bool = False,
+        eps: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        self.low_param = low_param
+        self.high_param = high_param
+        self.from_logits = from_logits
+        self.eps = eps
+
+    def forward(self, output: ModelOutput) -> torch.Tensor:
+        low = output.params[self.low_param]
+        high = output.params[self.high_param]
+        if self.from_logits:
+            low, high = torch.sigmoid(low), torch.sigmoid(high)
+        dtype = low.dtype
+        effect = cace_score(low, high).abs().norm()
+        return (1.0 / (effect + self.eps)).to(dtype)
+
+
+class CGMTrainingLoss(CompositeLoss):
+    """Training objective for :class:`~torch_concepts.nn.CausalCGM`.
+
+    The objective sums posterior and, when available, prior prediction losses.
+    Concepts and tasks are reduced separately and then added, as in the
+    original CGM objective. With mean reduction this gives the two blocks equal
+    aggregate weight, independently of their number of columns.
+    For a learnable graph it can additionally apply the DAGMA acyclicity and
+    inverse-CACE regularizers. ``prediction_loss`` defaults to a ``ConceptLoss``
+    supporting binary, categorical, and continuous variables.
+
+    Parameters
+    ----------
+    prediction_loss : PyCLoss, optional
+        Loss applied to posterior and prior predictions.
+    lambda_dag : float, default 3.0
+        Weight of the DAGMA acyclicity penalty.
+    lambda_cace : float, default 0.0
+        Weight of the inverse-CACE regularizer.
+    evaluation_loss : PyCLoss, optional
+        Loss used when evaluation output has no prior quantities. When omitted,
+        ``prediction_loss`` also scores evaluation output.
+    """
+
+    def __init__(
+        self, prediction_loss: Optional[PyCLoss] = None,
+        lambda_dag: float = 3.0, lambda_cace: float = 0.0,
+        evaluation_loss: Optional[PyCLoss] = None,
+    ) -> None:
+        prediction_loss = prediction_loss or ConceptLoss(
+            binary=nn.BCEWithLogitsLoss(),
+            categorical=nn.CrossEntropyLoss(),
+            continuous=nn.MSELoss(),
+        )
+        super().__init__(terms=[prediction_loss, prediction_loss], names=["posterior", "prior"])
+        self.lambda_dag = float(lambda_dag)
+        self.lambda_cace = float(lambda_cace)
+        self._prediction_loss = prediction_loss
+        self.evaluation_loss = evaluation_loss
+        self.learnable_graph = None
+        self.task_names = []
+
+    def configure_terms(self, graph_generator) -> None:
+        """Configure loss terms for the graph generator installed on the model."""
+        learnable = bool(
+            graph_generator is not None
+            and getattr(graph_generator, "trainable", True)
+        )
+        terms = [self._prediction_loss, self._prediction_loss]
+        weights = [1.0, 1.0]
+        names = ["posterior", "prior"]
+        if learnable and self.lambda_dag:
+            terms.append(DAGMALoss())
+            weights.append(self.lambda_dag)
+            names.append("dagma")
+        if self.lambda_cace:
+            terms.append(CACELoss(from_logits=True))
+            weights.append(self.lambda_cace)
+            names.append("cace")
+        self.terms = nn.ModuleList(terms)
+        self.weights = weights
+        self.term_names = names
+        self._takes_target = [
+            "target" in signature or has_var_kw
+            for signature, has_var_kw in (
+                _get_forward_signature(term) for term in terms
+            )
+        ]
+        self.learnable_graph = learnable
+        self.task_names = list(getattr(graph_generator, "task_names", ()))
+
+    def _split_prediction_loss(self, loss, output, target):
+        """Add independently reduced concept and task prediction losses."""
+        labels = list(target.annotation.labels)
+        task_names = set(self.task_names)
+        groups = [
+            [name for name in labels if name not in task_names],
+            [name for name in labels if name in task_names],
+        ]
+        values = [
+            loss(subset_output(output, names), target[names])
+            for names in groups if names
+        ]
+        if not values:
+            raise ValueError("CGM prediction loss received an empty target.")
+        return sum(values[1:], values[0])
+
+    @staticmethod
+    def _prior_view(output: ModelOutput, target):
+        """Expose ``prior_*`` quantities as an ordinary prediction output."""
+        params = {
+            quantity.removeprefix("prior_"): tensor
+            for quantity, tensor in output.params.items()
+            if quantity.startswith("prior_")
+        }
+        if not params:
+            return None, target
+        prior_labels = list(next(iter(params.values())).annotation.labels)
+        suffix = "__copy"
+        invalid = [label for label in prior_labels if not label.endswith(suffix)]
+        if invalid:
+            raise ValueError(
+                "CGM prior labels must end with '__copy'; "
+                f"got {invalid}."
+            )
+        source_labels = [label.removesuffix(suffix) for label in prior_labels]
+        if len(set(source_labels)) != len(source_labels):
+            raise ValueError(
+                f"CGM prior labels map to duplicate targets: {source_labels}."
+            )
+        missing = [
+            label for label in source_labels
+            if label not in target.annotation.label_to_index
+        ]
+        if missing:
+            raise ValueError(
+                f"CGM prior labels have no matching targets: {missing}."
+            )
+
+        selected_target = target[source_labels]
+        annotation = selected_target.annotation
+        source_params = {
+            quantity: AnnotatedTensor(
+                tensor.tensor, annotation, axis=target.axis
+            )
+            for quantity, tensor in params.items()
+        }
+        return (
+            ModelOutput(params=source_params, extra=output.extra),
+            selected_target,
+        )
+
+    def breakdown(self, output: ModelOutput, target=None) -> Dict[str, torch.Tensor]:
+        target = target if target is not None else output.target
+        prior_output, prior_target = self._prior_view(output, target)
+        if prior_output is None and self.evaluation_loss is not None:
+            return {
+                "posterior": self._split_prediction_loss(
+                    self.evaluation_loss, output, target
+                ),
+                "prior": target.new_zeros(()),
+            }
+        values = {
+            "posterior": self.weights[0] * self._split_prediction_loss(
+                self.terms[0], output, target
+            ),
+            "prior": target.new_zeros(()) if prior_output is None else
+            self.weights[1] * self._split_prediction_loss(
+                self.terms[1], prior_output, prior_target
+            ),
+        }
+        for name, term, weight in zip(
+            self.term_names[2:], self.terms[2:], self.weights[2:]
+        ):
+            required = (
+                {term.param} if name == "dagma"
+                else {term.low_param, term.high_param}
+            )
+            values[name] = (
+                weight * term(output)
+                if required.issubset(output.params)
+                else target.new_zeros(())
+            )
+        return values

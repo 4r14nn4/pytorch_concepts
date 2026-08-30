@@ -435,6 +435,20 @@ class ConceptDataModule(LightningDataModule):
             force=force,
         )
 
+    def precompute_graph(
+        self, graph_generator, cache: bool = True,
+        cache_dir: Optional[str] = None, force: bool = False,
+    ) -> None:
+        """Precompute a fixed graph on the underlying dataset."""
+        self.dataset.precompute_graph(
+            graph_generator, cache=cache,
+            cache_dir=cache_dir, force=force,
+        )
+
+    def set_graph_generator(self, graph_generator) -> None:
+        """Register a learnable graph generator without precomputing it."""
+        self.dataset.set_graph_generator(graph_generator)
+
     def setup(self, stage: StageOptions = None) -> None:
         """Prepare the data splits for training, validation, or testing.
 
@@ -487,7 +501,6 @@ class ConceptDataModule(LightningDataModule):
                 # Fit the scaler on the training data and store it in the dataset
                 scaler.fit(train_data)
                 self.dataset.add_scaler(key, scaler)
-
 
     def get_dataloader(self,
                        split: Literal['train', 'val', 'test'] = None,

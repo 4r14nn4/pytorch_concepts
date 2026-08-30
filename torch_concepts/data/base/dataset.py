@@ -138,8 +138,11 @@ class ConceptDataset(Dataset):
 
         # Store graph
         self._graph = None
+        self._graph_native = None
+        self._graph_generator = None
         if graph is not None:
             self.set_graph(graph)  # graph among all concepts
+            self._graph_native = self._graph
 
         self.scalers = {}  # dict of fitted scalers for input and concepts
 
@@ -214,7 +217,6 @@ class ConceptDataset(Dataset):
             batch['scalers'] = self.scalers
         return batch
 
-
     # Dataset properties #####################################################
 
     @property
@@ -283,6 +285,16 @@ class ConceptDataset(Dataset):
     def graph(self) -> Optional[ConceptGraph]:
         """Adjacency matrix of the causal graph between concepts."""
         return self._graph
+
+    @property
+    def graph_native(self) -> Optional[ConceptGraph]:
+        """Graph supplied by the dataset before graph generation."""
+        return self._graph_native
+
+    @property
+    def graph_generator(self):
+        """Graph generator configured for this dataset."""
+        return self._graph_generator
 
     # Dataset flags #####################################################
 
@@ -429,16 +441,85 @@ class ConceptDataset(Dataset):
                 if embs.shape[0] != self.n_samples:  # stale cache (e.g. written from a subset)
                     embs = None
         if embs is None:
-            embs = self._compute_embeddings(backbone, batch_size, workers)
+            embs = self.compute_embeddings(backbone, batch_size, workers)
             if cache:
                 logger.info(f"Saving embeddings to {cache_path}")
                 torch.save(embs, cache_path)
         self.input_data = embs
         self.embs_precomputed = True
 
-    def _compute_embeddings(self, backbone, batch_size: int, workers: int):
-        """Run ``backbone`` over the whole dataset (original order) and return
-        the stacked ``(n_samples, emb_dim)`` embeddings on CPU."""
+    def precompute_graph(
+        self,
+        graph_generator,
+        cache: bool = True,
+        cache_dir: Optional[str] = None,
+        force: bool = False,
+    ) -> None:
+        """Precompute a fixed graph and optionally reuse a persistent snapshot."""
+        if getattr(graph_generator, "trainable", False):
+            raise TypeError(
+                "precompute_graph only accepts fixed graph generators; use "
+                "set_graph_generator for a learnable generator."
+            )
+        self._graph_generator = graph_generator
+
+        graph = None
+        cache_path = None
+        if cache and graph_generator.name != "ground_truth":
+            cache_dir = cache_dir or self.root_dir
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_path = os.path.join(cache_dir, graph_generator.filename)
+            if os.path.exists(cache_path) and not force:
+                payload = torch.load(cache_path, weights_only=True)
+                if (
+                    payload.get("concept_names") == list(self.concept_names)
+                    and payload.get("n_samples") == self.n_samples
+                ):
+                    graph = ConceptGraph(
+                        payload["adjacency"],
+                        node_names=payload["concept_names"],
+                    )
+                    graph_generator._validate_graph(graph)
+                    graph_generator.graph = graph
+                    graph_generator.fitted = True
+                    graph_generator._graph_cache_key = (
+                        graph_generator._cache_key(self)
+                    )
+                    logger.info(
+                        "Loading a pre-existing graph from %s; "
+                        "set force=True to recompute it.",
+                        cache_path,
+                    )
+
+        if graph is None:
+            graph = graph_generator.construct_graph(self, force=force)
+            if cache_path is not None:
+                logger.info("Saving graph to %s", cache_path)
+                torch.save(
+                    {
+                        "adjacency": graph.data.cpu(),
+                        "concept_names": list(graph.node_names),
+                        "n_samples": self.n_samples,
+                    },
+                    cache_path,
+                )
+        self._graph = graph
+
+    def set_graph_generator(self, graph_generator) -> None:
+        """Register a learnable graph generator without materializing or caching it."""
+        if not getattr(graph_generator, "trainable", False):
+            raise TypeError(
+                "set_graph_generator only accepts learnable graph generators; "
+                "use precompute_graph for a fixed generator."
+            )
+        self._graph_generator = graph_generator
+
+    def compute_embeddings(self, backbone, batch_size: int = 64, workers: int = 0):
+        """Compute and return CPU embeddings in the original dataset order.
+
+        This method does not modify ``input_data`` or access the cache. Use
+        :meth:`precompute_embeddings` to install and optionally cache them.
+        """
         def collate_fn(batch):
             images = [sample['inputs']['x'] for sample in batch]
             if backbone.source != "huggingface" and isinstance(images[0], Tensor):
@@ -538,7 +619,7 @@ class ConceptDataset(Dataset):
         # Align the columns (and pick out a subset, if one was requested).
         if isinstance(concepts, (AnnotatedTensor, pd.DataFrame)):
             # By name: correct whatever order they arrive in, and idempotent.
-            concepts = concepts[self.concept_names]
+            concepts = concepts[list(self.concept_names)]
             concepts = getattr(concepts, 'tensor', concepts)
         elif isinstance(concepts, (np.ndarray, Tensor)):
             # By position: the only reading available for unlabelled columns.
