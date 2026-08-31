@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from functools import cached_property
+import copy
+import random
+from functools import cached_property, partial
 from typing import Optional, Sequence, Union
 
 import networkx as nx
@@ -17,6 +19,9 @@ from .....distributions import Delta
 from .....utils import ensure_list
 from ...low.dense_layers import MLP
 from ...low.graph_aggregator import GraphAggregator
+from ...low.intervention.intervention import InterventionModule
+from ...low.base.intervention import BaseInterventionPolicy
+from ...low.intervention.strategy.do import DoIntervention
 from ...low.sequential import Sequential
 from ...low.priors import LearnablePrior
 from ...low.predictors.mix import (
@@ -38,23 +43,60 @@ from ..base.graph import DirectedGraphModel
 
 
 def _project_to_dag(adjacency: torch.Tensor) -> torch.Tensor:
-    """Detach an adjacency and remove the weakest cyclic edges."""
+    """Project an adjacency to a DAG as in the original CausalCGM."""
     adjacency = adjacency.detach().clone()
-    graph = nx.from_numpy_array(adjacency.cpu().numpy(), create_using=nx.DiGraph)
-    while not nx.is_directed_acyclic_graph(graph):
-        cyclic_edges = {
-            edge
-            for component in nx.strongly_connected_components(graph)
-            if len(component) > 1
-            for edge in graph.subgraph(component).edges
-        }
-        weakest = min(
-            cyclic_edges,
-            key=lambda edge: (float(adjacency[edge]), *edge),
+    while True:
+        graph = nx.from_numpy_array(
+            adjacency.cpu().numpy(), create_using=nx.DiGraph
         )
-        adjacency[weakest] = 0
-        graph.remove_edge(*weakest)
-    return adjacency
+        try:
+            list(nx.topological_sort(graph))
+            return adjacency
+        except nx.NetworkXUnfeasible:
+            cyclic_edges = {
+                edge
+                for component in nx.strongly_connected_components(graph)
+                if len(component) > 1
+                for edge in graph.subgraph(component).edges
+            }
+            candidates = adjacency.clone()
+            candidates[candidates == 0] = 100
+            mask = torch.ones_like(candidates, dtype=torch.bool)
+            for edge in cyclic_edges:
+                mask[edge] = False
+            candidates[mask] = 100
+            weakest = torch.unravel_index(
+                candidates.argmin(), candidates.shape
+            )
+            adjacency[weakest] = 0
+
+
+class _CGMInterventionPolicy(BaseInterventionPolicy):
+    """Select explicit flattened concept columns per batch row."""
+
+    def __init__(self, indices: torch.Tensor):
+        super().__init__()
+        self.register_buffer("indices", indices.long())
+
+    def forward(self, concepts, *args, **kwargs):
+        indices = self.indices.to(concepts.device)
+        if indices.dim() == 1:
+            indices = indices.unsqueeze(-1)
+        return torch.ones_like(concepts).scatter(1, indices, 0.0)
+
+
+def _select_params(output, names, prefix=""):
+    """Select named variable views and optionally prefix their quantities."""
+    selected = {}
+    for quantity, tensor in output.params.items():
+        labels = {
+            *tensor.annotation.label_to_index,
+            *tensor.annotation.label_groups,
+        }
+        present = [name for name in names if name in labels]
+        if present:
+            selected[f"{prefix}{quantity}"] = tensor[present]
+    return selected
 
 
 class CausalCGM(DirectedGraphModel):
@@ -103,7 +145,8 @@ class CausalCGM(DirectedGraphModel):
         Learnable graph generator; ``None`` creates the paper's DAGMA-CGM
         generator with its default configuration. Graph-specific options such
         as ``no_out_task``, ``edges_to_check``, ``initialization``, and
-        ``initialization_data`` belong to the generator. If provided, must be a subclass of GraphGeneratorLearnable.
+        ``initialization_data`` belong to the generator. If provided,
+        it must be a ``GraphGeneratorLearnable``.
     inference : Optional[type[BaseInference]], default DeterministicInference
         Inference engine class for evaluation (see :class:`BaseInference`).
     inference_kwargs : Optional[dict], default None
@@ -214,11 +257,14 @@ class CausalCGM(DirectedGraphModel):
             generator=graph_generator,
             adjacency=None if graph_generator is not None else self.graph.data,
         )
+        self._graph_generator_validated = False
         configure_loss_terms = getattr(
             getattr(self, "loss", None), "configure_terms", None
         )
         if configure_loss_terms is not None:
             configure_loss_terms(self.graph_generator)
+            if hasattr(self.loss, "task_names"):
+                self.loss.task_names = list(self.task_names)
         if self.graph_generator is not None:
             self._validate_graph_generator_compatibility()
         self._build_model()
@@ -246,12 +292,18 @@ class CausalCGM(DirectedGraphModel):
 
     def _adjacency(self) -> torch.Tensor:
         """Return the trainable or fixed graph adjacency."""
-        return self.graph_layer.graph()
+        adjacency = self.graph_layer.graph()
+        if self.graph_generator is not None and not self._graph_generator_validated:
+            self._validate_graph_generator_compatibility(adjacency)
+        return adjacency
 
-    def _validate_graph_generator_compatibility(self) -> None:
+    def _validate_graph_generator_compatibility(
+        self, adjacency: Optional[torch.Tensor] = None,
+    ) -> None:
         """Validate the adjacency contract required by CausalCGM."""
-        with torch.no_grad():
-            adjacency = self.graph_generator()
+        if adjacency is None:
+            with torch.no_grad():
+                adjacency = self.graph_generator()
         expected = (len(self.concept_names), len(self.concept_names))
         if not isinstance(adjacency, torch.Tensor) or adjacency.shape != expected:
             raise ValueError(
@@ -276,6 +328,7 @@ class CausalCGM(DirectedGraphModel):
             raise ValueError(
                 "With no_out_task=True, task rows in the adjacency must be zero."
             )
+        self._graph_generator_validated = True
 
     def _input_latent_block(self):
         """Build the input and shared latent variables and their CPDs.
@@ -323,6 +376,35 @@ class CausalCGM(DirectedGraphModel):
     @property
     def structural_equations(self):
         return self._structural_equations
+
+    def _parametrization(self, variable, head):
+        """Build one head, plus an independent scale head for a Normal."""
+        second = copy.deepcopy(head) if "loc" in variable.param_sizes else None
+        return self._flexible_parametrization(variable, head, second=second)
+
+    def _aggregate_inputs(
+        self, inputs, *, exogenous, endogenous, sources, root=None,
+    ):
+        """Prepare the inputs consumed by a structural equation."""
+        if not sources:
+            return inputs[exogenous[root]]
+        aggregated = {
+            "concept_embeddings": [
+                inputs[exogenous[source]].unflatten(
+                    -1, (
+                        self.n_state_embeddings[source],
+                        self.embedding_size,
+                    ),
+                )
+                for source in sources
+            ],
+            "concept_values": [
+                inputs[endogenous[source]] for source in sources
+            ],
+        }
+        if root is not None:
+            aggregated["source_concepts"] = sources
+        return aggregated
 
     def _build_model(self) -> None:
         input_var, shared_var, self.input_cpd, self.shared_cpd = self._input_latent_block()
@@ -376,10 +458,9 @@ class CausalCGM(DirectedGraphModel):
         self.endogenous_copy_cpds = nn.ModuleList([
             ParametricCPD(
                 copy_var,
-                self._flexible_parametrization(
+                self._parametrization(
                     copy_var,
                     structural_equations.concept_structural_equations[node],
-                    second="auto",
                 ),
                 parents=[exogenous_var],
             )
@@ -388,20 +469,12 @@ class CausalCGM(DirectedGraphModel):
             ))
         ])
 
-        def aggregate(inputs):
-            return {
-                "concept_embeddings": [
-                    inputs[variable].unflatten(
-                        -1, (n_states, self.embedding_size)
-                    )
-                    for variable, n_states in zip(
-                        exogenous, self.n_state_embeddings
-                    )
-                ],
-                "concept_values": [
-                    inputs[copy] for copy in endogenous_copies
-                ],
-            }
+        aggregate = partial(
+            self._aggregate_inputs,
+            exogenous=exogenous,
+            endogenous=endogenous_copies,
+            sources=tuple(range(len(self.concept_names))),
+        )
 
         indices = {name: index for index, name in enumerate(self.concept_names)}
         self.endogenous_cpds = nn.ModuleList()
@@ -415,17 +488,10 @@ class CausalCGM(DirectedGraphModel):
             )
             cpd = ParametricCPD(
                 variable,
-                self._flexible_parametrization(
-                    variable,
-                    Sequential(
-                        self.mixer,
-                        self.graph_layer,
-                        equations,
-                    ),
-                    second="auto"
-                ),
+                self._parametrization(variable, equations),
                 parents=[*exogenous, *endogenous_copies],
                 aggregate=aggregate,
+                trunk=Sequential(self.mixer, self.graph_layer),
             )
             self.endogenous_cpds.append(cpd)
 
@@ -463,13 +529,23 @@ class CausalCGM(DirectedGraphModel):
             self._eval_inference_cls = inference
             self._eval_inference_kwargs = dict(inference_kwargs or {})
 
+    def materialize_graph(self):
+        """Materialize the learned graph through its generator pipeline."""
+        if self.graph_generator is None:
+            graph = ConceptGraph(
+                _project_to_dag(self._adjacency()),
+                node_names=self.concept_names,
+            )
+        else:
+            graph = self.graph_generator.construct_graph(
+                transform=_project_to_dag,
+            )
+        self._set_graph(graph)
+        return graph
+
     def materialize_bayesian_network(self):
         """Materialize and install the evaluation Bayesian network."""
-        graph = ConceptGraph(
-            _project_to_dag(self._adjacency()),
-            node_names=self.concept_names,
-        )
-        self._set_graph(graph)
+        graph = self.materialize_graph()
         exogenous = [cpd.variable for cpd in self.exogenous_cpds]
         endogenous = [
             self._make_concept_variable(name) for name in self.concept_names
@@ -481,35 +557,20 @@ class CausalCGM(DirectedGraphModel):
                 indices[parent] for parent in graph.get_predecessors(name)
             ]
 
-            def aggregate(inputs, node=node, parents=parents):
-                if not parents:
-                    return inputs[exogenous[node]]
-                embeddings = [
-                    inputs[exogenous[source]].unflatten(
-                        -1, (
-                            self.n_state_embeddings[source],
-                            self.embedding_size,
-                        ),
-                    )
-                    for source in parents
-                ]
-                mixed = self.mixer(
-                    embeddings,
-                    [inputs[endogenous[source]] for source in parents],
-                    source_concepts=parents,
-                )
-                return {
-                    "contexts": self.graph_layer(
-                        mixed, adjacency=graph.data, target_concept=node
-                    ),
-                    "target_concept": node,
-                }
+            aggregate = partial(
+                self._aggregate_inputs,
+                exogenous=exogenous,
+                endogenous=endogenous,
+                sources=parents,
+                root=node,
+            )
 
             parametrization = (
                 dict(self.endogenous_copy_cpds[node].parametrization)
                 if not parents else
-                self._flexible_parametrization(
-                    endogenous[node], self.structural_equations, second="auto"
+                self._parametrization(
+                    endogenous[node],
+                    self.structural_equations.for_targets([node]),
                 )
             )
             factors.append(ParametricCPD(
@@ -520,6 +581,10 @@ class CausalCGM(DirectedGraphModel):
                      *(endogenous[i] for i in parents)]
                 ),
                 aggregate=aggregate,
+                trunk=None if not parents else Sequential(
+                    self.mixer,
+                    GraphAggregator(adjacency=graph.data),
+                ),
             ))
 
         prefix_cpds = [self.input_cpd, self.shared_cpd, *self.exogenous_cpds]
@@ -534,6 +599,7 @@ class CausalCGM(DirectedGraphModel):
         self._modules.pop("eval_inference", None)
         object.__setattr__(self, "eval_pgm", eval_pgm)
         object.__setattr__(self, "eval_inference", eval_inference)
+        self._eval_pgm_stale = False
         return eval_pgm
 
     def train(self, mode: bool = True):
@@ -547,7 +613,7 @@ class CausalCGM(DirectedGraphModel):
     def _apply(self, fn):
         result = super()._apply(fn)
         if hasattr(self, "eval_pgm"):
-            self.materialize_bayesian_network()
+            self._eval_pgm_stale = True
         return result
 
     @cached_property
@@ -582,76 +648,92 @@ class CausalCGM(DirectedGraphModel):
         concepts generate one scenario per state. Other variable mixtures do
         not currently define a common intervention grid.
         """
-        if all(type_name == "binary" for type_name in self.endogenous_types):
-            selected = torch.randint(
-                len(self.intervention_indices),
-                observed[0].shape[:-1],
-                device=observed[0].device,
+        offsets = [0]
+        for cardinality in self.cardinalities:
+            offsets.append(offsets[-1] + cardinality)
+        eligible_columns = [
+            column
+            for node in self.intervention_indices
+            for column in range(offsets[node], offsets[node + 1])
+        ]
+
+        def intervene(constants, selected_columns):
+            values = torch.cat(observed, dim=-1)
+            module = InterventionModule(
+                nn.Identity(), DoIntervention(constants),
+                _CGMInterventionPolicy(selected_columns),
+                out_concepts_to_intervene_on=eligible_columns,
+                quantile=0.0,
             )
-            low = [value.clone() for value in observed]
-            high = [value.clone() for value in observed]
-            for choice, node in enumerate(self.intervention_indices):
-                mask = selected == choice
-                low[node][mask] = 0
-                high[node][mask] = 1
-            return {"low": low, "high": high}
+            return list(module(values).split(self.cardinalities, dim=-1))
+
+        if all(type_name == "binary" for type_name in self.endogenous_types):
+            leading_shape = observed[0].shape[:-1]
+            selected = torch.tensor(
+                [
+                    random.sample(range(len(self.intervention_indices)), 1)[0]
+                    for _ in range(leading_shape.numel())
+                ],
+                device=observed[0].device,
+            ).reshape(leading_shape)
+            selected_columns = torch.tensor(
+                [offsets[self.intervention_indices[choice]] for choice in selected],
+                device=observed[0].device,
+            ).reshape(leading_shape)
+            return {
+                "low": intervene(0.0, selected_columns),
+                "high": intervene(1.0, selected_columns),
+            }
         if (
             len(set(self.endogenous_types)) == 1
             and len(set(self.cardinalities)) == 1
             and self.endogenous_types[0] == "categorical"
         ):
-            selected = torch.randint(
-                len(self.intervention_indices),
-                observed[0].shape[:-1],
+            leading_shape = observed[0].shape[:-1]
+            selected = torch.tensor(
+                [
+                    random.sample(range(len(self.intervention_indices)), 1)[0]
+                    for _ in range(leading_shape.numel())
+                ],
                 device=observed[0].device,
-            )
+            ).reshape(leading_shape)
+            selected_columns = torch.stack([
+                torch.arange(
+                    offsets[self.intervention_indices[choice]],
+                    offsets[self.intervention_indices[choice] + 1],
+                    device=observed[0].device,
+                )
+                for choice in selected.flatten()
+            ]).reshape(*leading_shape, self.cardinalities[0])
             interventions = {}
             for category in range(self.cardinalities[0]):
-                values = [value.clone() for value in observed]
-                for choice, node in enumerate(self.intervention_indices):
-                    mask = selected == choice
-                    values[node][mask] = 0
-                    values[node][..., category][mask] = 1
-                interventions[f"category_{category}"] = values
+                constants = torch.zeros_like(torch.cat(observed, dim=-1))
+                constants.scatter_(
+                    1, selected_columns[:, category:category + 1], 1.0
+                )
+                interventions[f"category_{category}"] = intervene(
+                    constants, selected_columns
+                )
             return interventions
         return {}
 
     def _training_forward(self, query, evidence, **kwargs):
         """Assemble prior, posterior, graph, and optional intervention output."""
-        def select_params(output, names):
-            selected = {}
-            for quantity in output.quantities:
-                tensor = output.params[quantity]
-                labels = {
-                    *tensor.annotation.label_to_index,
-                    *tensor.annotation.label_groups,
-                }
-                present = [name for name in names if name in labels]
-                if present:
-                    selected[quantity] = tensor[present]
-            return selected
-
         source_names = self.copy_names
         observed = [query[name] for name in source_names]
         self.graph_layer.clear()
+        if self.graph_generator is not None and not self._graph_generator_validated:
+            self._adjacency()
         output = self._training_run(observed, evidence, **kwargs)
         adjacency = self.graph_layer.adjacency
-        params = select_params(output, self.concept_names)
-        params.update({
-            f"prior_{quantity}": tensor
-            for quantity, tensor in select_params(
-                output, source_names
-            ).items()
-        })
+        params = _select_params(output, self.concept_names)
+        params.update(_select_params(output, source_names, "prior_"))
         if self.run_interventions:
             for label, values in self._training_interventions(observed).items():
                 intervened = self._training_run(values, evidence, **kwargs)
-                params.update({
-                    f"{label}_{quantity}": tensor
-                    for quantity, tensor in select_params(
-                        intervened, self.concept_names
-                    ).items()
-                })
+                params.update(_select_params(
+                    intervened, self.concept_names, f"{label}_",
+                ))
         params["adjacency"] = adjacency
         return ModelOutput(
             params=params,
@@ -667,6 +749,8 @@ class CausalCGM(DirectedGraphModel):
         input. Lightning may continue to pass the query prepared by its shared
         step. An explicit ``query`` remains available for advanced inference.
         """
+        if not self.training and getattr(self, "_eval_pgm_stale", False):
+            self.materialize_bayesian_network()
         if query is not None and target is not None:
             raise ValueError("Pass either `query` or `target`, not both.")
         if query is None:
