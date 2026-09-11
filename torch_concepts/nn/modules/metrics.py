@@ -379,8 +379,11 @@ class ConceptMetrics(nn.Module):
                     categorical, target[categorical.annotation.labels])
                 self.categorical.update(cat_pred, cat_target)
             if continuous is not None and len(self.continuous):
+                # Label slices can be strided views, while regression metrics
+                # may flatten with view(). Keep shapes and values unchanged.
                 self.continuous.update(
-                    continuous.tensor, target[continuous.annotation.labels].tensor)
+                    continuous.tensor.contiguous(),
+                    target[continuous.annotation.labels].tensor.contiguous())
 
         # Per-concept metrics — read each concept from its type's quantity.
         for concept_name, collection in self._per_concept.items():
@@ -396,7 +399,7 @@ class ConceptMetrics(nn.Module):
                     c_target.reshape(-1).long(),
                 )
             else:  # continuous
-                collection.update(c_pred, c_target)
+                collection.update(c_pred.contiguous(), c_target.contiguous())
 
     def compute(self):
         """Compute all metrics and return as a flat dict."""

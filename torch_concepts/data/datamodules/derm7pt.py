@@ -1,7 +1,7 @@
 from ..datasets.derm7pt import Derm7ptDataset
 
 from ..base.datamodule import ConceptDataModule
-from ...typing import BackboneType
+from torch.nn import Module
 from ..base.splitter import Splitter
 from ..splitters import NativeSplitter
 
@@ -35,7 +35,7 @@ class Derm7ptDataModule(ConceptDataModule):
         If int, interpreted as absolute number of samples. Default: 0.2
     batch_size : int, optional
         Number of samples per batch. Default: 512
-    backbone : BackboneType, optional
+    backbone : str or Module, optional
         Backbone model for feature extraction (e.g., InceptionV3). If provided,
         can be used to precompute embeddings. Default: InceptionV3 pretrained on ImageNet
     precompute_embs : bool, optional
@@ -105,7 +105,7 @@ class Derm7ptDataModule(ConceptDataModule):
         val_size: int | float = 0.1,
         test_size: int | float = 0.2,
         batch_size: int = 512,
-        backbone: BackboneType = "InceptionV3",
+        backbone: str | Module = "InceptionV3",
         precompute_embs: bool = True,
         force_recompute: bool = False,
         concept_subset: list | None = None,

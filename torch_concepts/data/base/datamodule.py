@@ -88,6 +88,9 @@ class ConceptDataModule(LightningDataModule):
     pin_memory : bool, optional
         If True, the data loader will copy Tensors into pinned memory
         before returning them. Useful for GPU training. Default is False.
+    drop_last : bool, optional
+        If True, discard an incomplete final training batch. Validation and test
+        batches are never dropped. Default is True.
     seed : int or None, optional
         Seed controlling the ``max_samples`` subsampling and the train/val/test
         **split**, passed to the splitter. If None, both are non-deterministic.
@@ -159,6 +162,7 @@ class ConceptDataModule(LightningDataModule):
         splitter: Optional[object] = None,
         workers: int = 0,
         pin_memory: bool = False,
+        drop_last: bool = True,
         seed: Optional[int] = None
     ):
         super(ConceptDataModule, self).__init__()
@@ -203,6 +207,7 @@ class ConceptDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.workers = workers
         self.pin_memory = pin_memory
+        self.drop_last = bool(drop_last)
 
         if scalers is not None:
             self.scalers = scalers
@@ -533,8 +538,8 @@ class ConceptDataModule(LightningDataModule):
 
         Notes
         -----
-        For training DataLoaders, ``drop_last=True`` is set to ensure
-        consistent batch sizes across iterations.
+        Training DataLoaders use the data module's configurable
+        ``drop_last`` option; validation and test loaders never drop samples.
         """
         if split is None:
             dataset = self.dataset
@@ -553,7 +558,7 @@ class ConceptDataModule(LightningDataModule):
         return DataLoader(dataset,
                           batch_size=batch_size or self.batch_size,
                           shuffle=shuffle,
-                          drop_last=split == 'train',
+                          drop_last=self.drop_last if split == 'train' else False,
                           num_workers=self.workers,
                           pin_memory=pin_memory,
                           collate_fn=collate_fn)

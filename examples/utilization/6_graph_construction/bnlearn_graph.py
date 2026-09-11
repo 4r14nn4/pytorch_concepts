@@ -25,10 +25,14 @@ Optional dependencies:
 - The Graphviz system executable (``dot``) is also required.
 """
 
+from functools import partial
+from torch_concepts.construct_graph import refine_llm
+from torch_concepts.data.concept_generator.llm_backends import LiteLLMBackend
 from pathlib import Path
 
 from torch_concepts import seed_everything
 from torch_concepts.data import BnLearnDataModule
+from torch_concepts.construct_graph import GraphGeneratorFixed
 
 
 # Configuration shared by the LLM-based strategies.
@@ -151,16 +155,11 @@ def main():
         # ------------------------------------------------------------------
         # CausalLearn + LLM
         # ------------------------------------------------------------------
+        backend = LiteLLMBackend(model=LLM_MODEL, api_key=api_key, temperature=0, max_tokens=200)
         datamodule.precompute_graph(
             name="ges",
             source="Causallearn",
-            refinement={
-                "name": LLM_MODEL,
-                "source": "LLM",
-                "api_key": api_key,
-                "domain": DOMAIN,
-                "use_rag": False,
-            },
+            refinement=partial(refine_llm, llm_backend=backend, domain=DOMAIN),
         )
         hybrid_graph = datamodule.graph
         print("\nCausalLearn + LLM graph")

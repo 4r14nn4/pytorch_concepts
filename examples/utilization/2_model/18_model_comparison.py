@@ -4,6 +4,9 @@ GES + LLM supplies the fixed graph used by C2BM and CGM-GraphFixed.
 CGM-Learnable instead learns its own graph.
 All models are compared on observational accuracy and causal interventions.
 """
+from functools import partial
+from torch_concepts.construct_graph import refine_llm
+from torch_concepts.data.concept_generator.llm_backends import LiteLLMBackend
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -26,6 +29,7 @@ from torch_concepts.nn import (
     MLP,
     WeightedConceptLoss,
 )
+from torch_concepts.construct_graph import GraphGeneratorFixed
 
 
 SEED = 42
@@ -144,15 +148,11 @@ def main():
     )
     if not LLM_API_KEY:
         raise RuntimeError("Set LLM_API_KEY in this file before running the example.")
+    backend = LiteLLMBackend(model=LLM_MODEL, api_key=LLM_API_KEY, temperature=0, max_tokens=200)
     dm.precompute_graph(
         GraphGeneratorFixed(
             name="ges",
-            refinement={
-                "name": LLM_MODEL,
-                "api_key": LLM_API_KEY,
-                "domain": "medical diagnosis",
-                "use_rag": False,
-            },
+            refinement=partial(refine_llm, llm_backend=backend, domain="medical diagnosis"),
         ),
         cache=True,
     )

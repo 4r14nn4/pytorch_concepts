@@ -5,6 +5,8 @@ This module provides the ConceptDataset class, which serves as the foundation
 for all concept-based datasets in the torch_concepts package.
 """
 from abc import abstractmethod
+import hashlib
+import json
 import os
 import logging
 import numpy as np
@@ -455,7 +457,11 @@ class ConceptDataset(Dataset):
         cache_dir: Optional[str] = None,
         force: bool = False,
     ) -> None:
-        """Precompute a fixed graph and optionally reuse a persistent snapshot."""
+        """Precompute a fixed graph and optionally reuse a persistent snapshot.
+
+        Custom refinements use only the in-memory cache because arbitrary
+        callables do not provide a stable identity across processes.
+        """
         if getattr(graph_generator, "trainable", False):
             raise TypeError(
                 "precompute_graph only accepts fixed graph generators; use "
@@ -465,10 +471,18 @@ class ConceptDataset(Dataset):
 
         graph = None
         cache_path = None
-        if cache and graph_generator.name != "ground_truth":
+        if (
+            cache
+            and graph_generator.name != "ground_truth"
+            and graph_generator._spec.refinement is None
+        ):
             cache_dir = cache_dir or self.root_dir
             os.makedirs(cache_dir, exist_ok=True)
-            cache_path = os.path.join(cache_dir, graph_generator.filename)
+            cache_key = graph_generator._cache_key(self)
+            cache_digest = hashlib.sha256(
+                json.dumps(cache_key, ensure_ascii=True).encode("utf-8")
+            ).hexdigest()
+            cache_path = os.path.join(cache_dir, f"graph_{cache_digest}.pt")
             if os.path.exists(cache_path) and not force:
                 payload = torch.load(cache_path, weights_only=True)
                 if (

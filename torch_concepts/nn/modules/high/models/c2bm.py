@@ -113,7 +113,7 @@ class CausallyReliableConceptBottleneckModel(HomogenGraphModel):
 
     def build_predictor(self, in_concepts: Annotations, in_embeddings, out_concepts):
         return HyperlinearConceptEmbeddingToConcept(
-            in_concepts=int(sum(in_concepts.cardinalities)),
+            in_concepts=in_concepts,
             in_embeddings=in_embeddings,
             hidden_size=self.hypernet_hidden_size,
             use_bias=self.hypernet_use_bias,

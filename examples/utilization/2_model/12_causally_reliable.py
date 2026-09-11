@@ -2,6 +2,9 @@
 Example: Using CausallyReliableConceptBottleneckModel
 """
 
+from functools import partial
+from torch_concepts.construct_graph import refine_llm
+from torch_concepts.data.concept_generator.llm_backends import LiteLLMBackend
 import torch
 from pathlib import Path
 from pytorch_lightning import Trainer
@@ -14,6 +17,7 @@ from torch_concepts.nn.modules.loss import ConceptLoss
 from torch_concepts.nn.modules.metrics import ConceptMetrics
 from torch_concepts.data import BnLearnDataModule
 from torch_concepts.nn.modules.mid.inference.torch.deterministic import DeterministicInference
+from torch_concepts.construct_graph import GraphGeneratorFixed
 
 def main():
 
@@ -37,16 +41,11 @@ def main():
                                    test_size=0.2)
     
 
+    backend = LiteLLMBackend(model=LLM_MODEL, api_key=api_key, temperature=0, max_tokens=200)
     datamodule.precompute_graph(
         name="ges",
         source="Causallearn",
-        refinement={
-            "name": LLM_MODEL,
-            "source": "LLM",
-            "api_key": api_key,
-            "domain": "medical diagnosis",
-            "use_rag": False,
-        },
+        refinement=partial(refine_llm, llm_backend=backend, domain="medical diagnosis"),
         use_as_gt=True,
     )
     graph = datamodule.graph

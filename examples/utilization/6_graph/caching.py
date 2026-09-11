@@ -15,10 +15,10 @@ Flow:
 1. Generate samples from the Asia Bayesian network.
 2. Run GES without refinement and display the error if its CPDAG is not a DAG.
 3. Repeat GES with an LLM refinement that orients ambiguous edges.
-4. Load the refined graph from cache without rerunning GES or the LLM.
+4. Reuse the refined graph from memory without rerunning GES or the LLM.
 5. Train ``CausalCGM`` using the fixed graph.
 
-The graph is cached on disk. Pass ``force=True`` to recompute it.
+Unrefined graphs are cached on disk; callable refinements use the in-memory cache. Pass ``force=True`` to recompute it.
 
 Optional dependency: ``pip install causal-learn``.
 The refinement also requires ``litellm`` and an API key.
@@ -26,6 +26,9 @@ The refinement also requires ``litellm`` and an API key.
 The same graph API exists one level down on the dataset itself:
 ``dm.dataset.precompute_graph(generator, cache=True, force=False)``.
 """
+from functools import partial
+from torch_concepts.construct_graph import refine_llm
+from torch_concepts.data.concept_generator.llm_backends import LiteLLMBackend
 import os
 import time
 from pathlib import Path
@@ -37,6 +40,7 @@ from torch_concepts import seed_everything
 from torch_concepts.construct_graph import GraphGeneratorFixed
 from torch_concepts.data import BnLearnDataModule
 from torch_concepts.nn import CGMTrainingLoss, CausalCGM, MLP
+from torch_concepts.construct_graph import GraphGeneratorFixed
 
 
 LLM_MODEL = "groq/openai/gpt-oss-20b"
@@ -91,25 +95,20 @@ def main():
             "Set LLM_API_KEY in this file to run the GES + LLM refinement."
         )
 
-    refinement = {
-        "name": LLM_MODEL,
-        "api_key": LLM_API_KEY,
-        "domain": DOMAIN,
-        "use_rag": False,
-    }
+    backend = LiteLLMBackend(model=LLM_MODEL, api_key=LLM_API_KEY, temperature=0, max_tokens=200)
+    refinement = partial(refine_llm, llm_backend=backend, domain=DOMAIN, concept_descriptions={**DATASET_LABEL_DESCRIPTIONS, **NEW_LABEL_DESCRIPTIONS})
 
     # if new descriptions are provided, they override the dataset descriptions for the
     # concepts for which they are specified.
     generator = GraphGeneratorFixed(
         name="ges",
         refinement=refinement,
-        concept_descriptions=NEW_LABEL_DESCRIPTIONS,
     )
 
     # 3. Recompute GES and ask the LLM to orient its ambiguous edges. The
-    # refined DAG is cached; source is inferred for both GES and the LLM.
+    # refined DAG is cached in memory.
     t0 = time.perf_counter()
-    dm.precompute_graph(generator, cache=True, force=True) # default concept description: dataset.label_descriptions
+    dm.precompute_graph(generator, cache=True, force=True)
     print(f"First precompute_graph call:  {time.perf_counter() - t0:.2f}s")
 
     # 4. Load the same refined graph without rerunning GES or the LLM.

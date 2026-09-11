@@ -1,7 +1,7 @@
 from ..datasets.cebab import CEBaBDataset
 
 from ..base.datamodule import ConceptDataModule
-from ...typing import BackboneType
+from torch.nn import Module
 from ..base.splitter import Splitter
 from ..splitters.native import NativeSplitter
 
@@ -28,7 +28,7 @@ class CEBaBDataModule(ConceptDataModule):
         train / val / test splits).
     batch_size : int, optional
         Number of samples per batch.  Default: 512.
-    backbone : BackboneType, optional
+    backbone : str or Module, optional
         Backbone model for feature extraction (e.g. ``'bert-base-uncased'``).
         Default: ``bert-base-uncased``.
     precompute_embs : bool, optional
@@ -62,7 +62,7 @@ class CEBaBDataModule(ConceptDataModule):
         root: str = None,
         splitter: Splitter = NativeSplitter(),
         batch_size: int = 512,
-        backbone: BackboneType = 'bert-base-uncased',
+        backbone: str | Module = 'bert-base-uncased',
         precompute_embs: bool = True,
         force_recompute: bool = False,
         concepts_type: str = 'discrete',

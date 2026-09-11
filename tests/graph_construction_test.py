@@ -1,3 +1,4 @@
+from functools import partial
 """Tests for fixed, learnable, and refined concept-graph construction."""
 
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import torch
 from torch_concepts import ConceptGraph
 from torch_concepts.construct_graph import (
     GraphGenerator,
+    refine_llm,
     GraphGeneratorFixed,
     GraphGeneratorFixedSpec,
     GraphGeneratorLearnable,
@@ -246,9 +248,9 @@ class TestRefinement:
             {"name": "ges", "source": "Causallearn"},
         ],
     )
-    def test_rejects_builtin_refiners_without_orient_edges(self, refinement):
-        """Require a dedicated orientation callback from every refiner."""
-        with pytest.raises(TypeError, match="does not support edge orientation"):
+    def test_rejects_non_callable_refiners(self, refinement):
+        """Require a callable rather than a configuration dictionary."""
+        with pytest.raises(TypeError, match="must be callable"):
             GraphGeneratorFixed(
                 name="ground_truth", source="GroundTruth", refinement=refinement
             )
@@ -268,12 +270,9 @@ class TestRefinement:
         generator = GraphGeneratorFixed(
             name="ground_truth",
             source="GroundTruth",
-            refinement={
-                "name": "fake-model", "source": "LLM", "llm_backend": backend,
-                "use_rag": False,
-            },
+            refinement=partial(refine_llm, llm_backend=backend),
         )
-        graph = generator.generate(dataset)
+        graph = generator.construct_graph(dataset)
 
         torch.testing.assert_close(
             graph.data,
@@ -291,12 +290,11 @@ class TestRefinement:
         generator = GraphGeneratorFixed(
             name="ground_truth",
             source="GroundTruth",
-            refinement={
-                "name": "fake-model", "source": "LLM", "llm_backend": backend,
-                "use_rag": False,
-            },
+            refinement=partial(refine_llm, llm_backend=backend),
         )
-        assert generator.generate(dataset) is dataset.graph_native
+        torch.testing.assert_close(
+            generator.construct_graph(dataset).data, dataset.graph_native.data,
+        )
 
 
 class TestWANDAConstruction:

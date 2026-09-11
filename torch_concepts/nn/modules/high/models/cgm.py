@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import random
 from functools import cached_property, partial
 from typing import Optional, Sequence, Union
@@ -42,16 +41,17 @@ from ...outputs import ModelOutput
 from ..base.graph import DirectedGraphModel
 
 
-def _project_to_dag(adjacency: torch.Tensor) -> torch.Tensor:
+def _project_to_dag(graph: ConceptGraph) -> ConceptGraph:
     """Project an adjacency to a DAG as in the original CausalCGM."""
-    adjacency = adjacency.detach().clone()
+    node_names = list(graph.node_names)
+    adjacency = graph.data.detach().clone()
     while True:
         graph = nx.from_numpy_array(
             adjacency.cpu().numpy(), create_using=nx.DiGraph
         )
         try:
             list(nx.topological_sort(graph))
-            return adjacency
+            return ConceptGraph(adjacency, node_names=node_names)
         except nx.NetworkXUnfeasible:
             cyclic_edges = {
                 edge
@@ -205,6 +205,7 @@ class CausalCGM(DirectedGraphModel):
             graph_generator = GraphGeneratorLearnable(
                 name="dagma_cgm",
                 source="DAGMA_CGM",
+                refinement=_project_to_dag,
                 concept_names=list(annotations.labels),
                 task_names=task_names,
             )
@@ -377,11 +378,6 @@ class CausalCGM(DirectedGraphModel):
     def structural_equations(self):
         return self._structural_equations
 
-    def _parametrization(self, variable, head):
-        """Build one head, plus an independent scale head for a Normal."""
-        second = copy.deepcopy(head) if "loc" in variable.param_sizes else None
-        return self._flexible_parametrization(variable, head, second=second)
-
     def _aggregate_inputs(
         self, inputs, *, exogenous, endogenous, sources, root=None,
     ):
@@ -458,9 +454,10 @@ class CausalCGM(DirectedGraphModel):
         self.endogenous_copy_cpds = nn.ModuleList([
             ParametricCPD(
                 copy_var,
-                self._parametrization(
+                self._flexible_parametrization(
                     copy_var,
                     structural_equations.concept_structural_equations[node],
+                    second="copy",
                 ),
                 parents=[exogenous_var],
             )
@@ -488,7 +485,7 @@ class CausalCGM(DirectedGraphModel):
             )
             cpd = ParametricCPD(
                 variable,
-                self._parametrization(variable, equations),
+                self._flexible_parametrization(variable, equations, second="copy"),
                 parents=[*exogenous, *endogenous_copies],
                 aggregate=aggregate,
                 trunk=Sequential(self.mixer, self.graph_layer),
@@ -532,14 +529,11 @@ class CausalCGM(DirectedGraphModel):
     def materialize_graph(self):
         """Materialize the learned graph through its generator pipeline."""
         if self.graph_generator is None:
-            graph = ConceptGraph(
-                _project_to_dag(self._adjacency()),
-                node_names=self.concept_names,
-            )
+            graph = _project_to_dag(ConceptGraph(
+                self._adjacency(), node_names=self.concept_names,
+            ))
         else:
-            graph = self.graph_generator.construct_graph(
-                transform=_project_to_dag,
-            )
+            graph = self.graph_generator.construct_graph()
         self._set_graph(graph)
         return graph
 
@@ -568,9 +562,10 @@ class CausalCGM(DirectedGraphModel):
             parametrization = (
                 dict(self.endogenous_copy_cpds[node].parametrization)
                 if not parents else
-                self._parametrization(
+                self._flexible_parametrization(
                     endogenous[node],
                     self.structural_equations.for_targets([node]),
+                    second="copy",
                 )
             )
             factors.append(ParametricCPD(

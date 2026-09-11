@@ -12,12 +12,9 @@ Concept graph generation utilities.
   Built-in sources: ``'WANDA'`` and
   ``'DAGMA_CGM'``.
 
-Both concrete APIs inherit from :class:`GraphGenerator`, support optional
-LLM refinement, and return a :class:`ConceptGraph`, which owns inspection and
-plotting. Refinement currently requires ``source="LLM"`` because LLM is the
-only registered fixed source that provides edge orientation. For a learnable
-generator, refinement is applied when ``construct_graph`` materializes the current
-graph, typically after training.
+Both concrete APIs return a :class:`ConceptGraph`, which owns inspection and
+plotting. Optional refinement accepts any ``ConceptGraph -> ConceptGraph``
+callable, including the standalone :func:`refine_llm` function.
 
 Caching
 -------
@@ -27,32 +24,23 @@ validate, and save a new one. Fixed generators also reuse their materialized
 graph in memory unless ``force=True``. Learnable generators are registered for
 end-to-end training instead: their graphs are never persisted or reused from a
 cache. After training, ``construct_graph`` materializes the latest valid
-``forward`` snapshot and then applies refinement and validation.
+``forward`` result and then applies refinement and validation.
 
 Concept descriptions
 --------------------
-Descriptions are resolved once, at the beginning of ``construct_graph``. For
-each concept, an entry supplied through ``concept_descriptions`` takes
-precedence; otherwise the generator falls back to
-``dataset.label_descriptions`` and finally to an empty string. The resulting
-mapping is shared by both direct LLM generation and LLM refinement, so the two
-paths cannot resolve descriptions differently.
+Direct LLM generation resolves descriptions from ``concept_descriptions`` and
+then ``dataset.label_descriptions``. The standalone ``refine_llm`` function
+uses the ``concept_descriptions`` mapping passed to it.
 
 Extensibility:
 
-- **refinement**: refine a fixed or learned graph by passing an LLM generator
-  configuration through ``refinement``. Currently, refinement supports only
-  ``source="LLM"``; other sources do not provide the required ``refinement``
-  callback. ``construct_graph`` returns the refined graph directly::
+- **refinement**: pass a callable through ``refinement``::
+
+      from functools import partial
 
       generator = GraphGeneratorFixed(
           name="ges",
-          source="Causallearn",
-          refinement={
-              "name": "groq/openai/gpt-oss-20b",
-              "source": "LLM",
-              "api_key": api_key,
-          },
+          refinement=partial(refine_llm, llm_backend=backend, domain="weather"),
       )
 
 - **per-name** (``'ges'`` vs ``'pc'``, or one LLM model vs another): pass the
@@ -91,6 +79,7 @@ from __future__ import annotations
 
 import math
 import re
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, List, NamedTuple, Optional, Sequence
@@ -100,33 +89,34 @@ import torch
 import torch.nn as nn
 
 from torch_concepts.concept_graph import ConceptGraph
-from torch_concepts.data.concept_generator import llm_backends
+#from torch_concepts.data.concept_generator import llm_backends
 
 
 DEFAULT_REFINEMENT_MODEL = "groq/openai/gpt-oss-20b"
+
 
 if TYPE_CHECKING:
     from torch_concepts.data.base.dataset import ConceptDataset
 
 
-class _LiteLLMBackendWithMillisecondRetry(llm_backends.LiteLLMBackend):
-    @staticmethod
-    def _rate_limit_wait_seconds(error: Exception) -> float | None:
-        wait_seconds = llm_backends.LiteLLMBackend._rate_limit_wait_seconds(error)
-        if wait_seconds is not None:
-            return wait_seconds
+#class _LiteLLMBackendWithMillisecondRetry(llm_backends.LiteLLMBackend):
+#    @staticmethod
+#    def _rate_limit_wait_seconds(error: Exception) -> float | None:
+#        wait_seconds = llm_backends.LiteLLMBackend._rate_limit_wait_seconds(error)
+#        if wait_seconds is not None:
+#            return wait_seconds
 
-        match = re.search(
-            r"Please try again in (?P<delay>\d+(?:\.\d+)?)(?P<unit>ms|s)",
-            str(error),
-            flags=re.IGNORECASE,
-        )
-        if match:
-            delay = float(match.group("delay"))
-            if match.group("unit").lower() == "ms":
-                delay /= 1000.0
-            return delay + 1.0
-        return None
+#        match = re.search(
+#            r"Please try again in (?P<delay>\d+(?:\.\d+)?)(?P<unit>ms|s)",
+#            str(error),
+#            flags=re.IGNORECASE,
+#        )
+#        if match:
+#            delay = float(match.group("delay"))
+#            if match.group("unit").lower() == "ms":
+#                delay /= 1000.0
+#            return delay + 1.0
+#        return None
 
 
 class GraphGenerator:
@@ -136,6 +126,14 @@ class GraphGenerator:
     Subclasses keep separate source registries and implement their fixed or learnable contract
     according to their fixed or learnable semantics.
 
+    Dataset identity is assumed to be determined by the ordered
+    ``dataset.concept_names`` and ``dataset.n_samples``. Datasets with the
+    same concept names and sample count share a cache identity, even when
+    their values differ; use ``force=True`` to recompute in that case.
+    Learnable generators also include parameter versions in their own
+    in-memory cache key to detect weight updates. Without a dataset, the
+    dataset identity is ``None``.
+
     Parameters
     ----------
     name : str
@@ -143,9 +141,10 @@ class GraphGenerator:
     source : str, optional
         Registered implementation family. It is inferred when ``name`` maps
         to exactly one registered source; otherwise it must be provided.
-    refinement : dict, optional
-        Optional LLM refinement configuration applied after fixed ``compute``
-        or when a learnable graph is materialized after training.
+    refinement : callable, optional
+        A ``ConceptGraph -> ConceptGraph`` callable applied after generation
+        and before validation. Use ``partial(refine_llm, llm_backend=backend)`` for LLM edge orientation.
+        ``None`` disables refinement.
     require_dag : bool, default True
         Validate the final graph after generation and refinement, raising an
         error unless it is a directed acyclic graph.
@@ -178,7 +177,7 @@ class GraphGenerator:
         self,
         name: str,
         source: Optional[str] = None,
-        refinement: Optional[dict[str, Any]] = None,
+        refinement: Optional[Callable[[ConceptGraph], ConceptGraph]] = None,
         require_dag: bool = True,
         concept_descriptions: Optional[dict[str, str]] = None,
         **kwargs: Any,
@@ -196,11 +195,16 @@ class GraphGenerator:
         self.fitted = False
         self._graph_cache_key: Any = None
         self._concept_descriptions = dict(concept_descriptions or {})
-        self.refinement = self._resolve_refinement(refinement)
-        self._spec = self._configure_spec(
-            refinement=self.refinement,
-            **kwargs,
-        )
+        if self.source not in self._sources:
+            raise ValueError(
+                f"Unknown source {self.source!r} for {type(self).__name__}; "
+                f"registered sources: {sorted(self._sources)}. Register new "
+                f"ones with @{type(self).__name__}.register_source(...)."
+            )
+        spec = self._sources[self.source](self, self.name, **kwargs)
+        if refinement is not None and not callable(refinement):
+            raise TypeError("`refinement` must be callable or None.")
+        self._spec = replace(spec, refinement=refinement)
 
     @classmethod
     def register_source(
@@ -231,90 +235,7 @@ class GraphGenerator:
             "specify `source`."
         )
 
-    @property
-    def filename(self) -> str:
-        """Cache filename determined by method, source, and refinement."""
-        parts = [type(self).__name__, self.name, self.source]
-        if self.refinement is not None:
-            parts.extend([
-                "refined", self.refinement["name"], self.refinement["source"],
-            ])
-        safe_parts = [
-            "".join(character if character.isalnum() else "_" for character in part)
-            for part in parts
-        ]
-        return "graph_" + "_".join(safe_parts) + ".pt"
-
-    def _resolve_refinement(
-        self,
-        refinement: Optional[dict[str, Any]],
-    ) -> Optional[dict[str, Any]]:
-        """Fill refinement defaults and resolve its registered source."""
-        if not refinement:
-            return None
-        config = {
-            "name": DEFAULT_REFINEMENT_MODEL,
-            "source": "LLM",
-            **refinement,
-        }
-        config["source"] = GraphGeneratorFixed.resolve_source(
-            config["name"], config["source"]
-        )
-        if config["source"] != "LLM":
-            raise TypeError("Graph refinement must use source='LLM'.")
-        return config
-
-    def _configure_spec(
-        self,
-        refinement: Optional[dict[str, Any]] = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Build the source spec, including its selected refinement callback."""
-        if self.source not in self._sources:
-            raise ValueError(
-                f"Unknown source {self.source!r} for {type(self).__name__}; "
-                f"registered sources: {sorted(self._sources)}. Register new "
-                f"ones with @{type(self).__name__}.register_source(...)."
-            )
-        spec = self._sources[self.source](self, self.name, **kwargs)
-        if refinement is None:
-            return replace(spec, refinement=None)
-
-        refinement_kwargs = dict(refinement)
-        refinement_name = refinement_kwargs.pop("name")
-        refinement_source = refinement_kwargs.pop("source")
-        refinement_spec = GraphGeneratorFixed._sources[refinement_source](
-            self, refinement_name, **refinement_kwargs
-        )
-        if refinement_spec.refinement is None:
-            raise TypeError(
-                f"Graph refinement source {refinement_source!r} does not "
-                "provide a refinement callback."
-            )
-        return replace(spec, refinement=refinement_spec.refinement)
-
-    def _validate_graph(self, graph: ConceptGraph) -> None:
-        if self.require_dag and not graph.is_directed_acyclic():
-            raise ValueError(
-                f"Graph method {self.name!r} produced a graph that is not a "
-                "directed acyclic graph (DAG). DAG validation is enabled by "
-                "default. Choose another method, for example "
-                "`GraphGeneratorFixed(name='ges')`, or orient ambiguous edges "
-                "with an LLM refinement, for example "
-                "`GraphGeneratorFixed(name='pc', "
-                "refinement={'domain': 'your domain'})`. Pass "
-                "`require_dag=False` only when a non-DAG is intentional."
-            )
-
-    def _refine(
-        self,
-        graph: ConceptGraph,
-    ) -> ConceptGraph:
-        if self._spec.refinement is not None:
-            return self._spec.refinement(self, graph)
-        return graph
-
-    def _bind_context(self, dataset: Optional[ConceptDataset]) -> None:
+    def _resolve_context(self, dataset: Optional[ConceptDataset]) -> None:
         """Fill missing concept descriptions from the current dataset."""
         if dataset is None:
             return
@@ -328,8 +249,41 @@ class GraphGenerator:
             for name in dataset.concept_names
         }
 
+    def _validate_graph(self, graph: ConceptGraph) -> None:
+        if self.require_dag and not graph.is_directed_acyclic():
+            raise ValueError(
+                f"Graph method {self.name!r} produced a graph that is not a "
+                "directed acyclic graph (DAG). DAG validation is enabled by "
+                "default. Choose another method, for example "
+                "`GraphGeneratorFixed(name='ges')`, or orient ambiguous edges "
+                "with an LLM refinement, for example "
+                "`GraphGeneratorFixed(name='pc', "
+                "refinement=partial(refine_llm, llm_backend=backend))`. Pass "
+                "`require_dag=False` only when a non-DAG is intentional."
+            )
+
+
+
+    def _cache_key(self, dataset) -> Any:
+        """Identify a graph by configuration, dataset metadata and weight versions."""
+        refinement = self._spec.refinement
+        versions = self._parameter_versions() if self.trainable else None
+        dataset_key = (
+            (tuple(dataset.concept_names), dataset.n_samples)
+            if dataset is not None else None
+        )
+        return (
+            type(self).__name__, self.source, self.name, refinement,
+            dataset_key, versions,
+        )
+
     def _cached_graph(self, cache_key: Any, force: bool) -> Optional[ConceptGraph]:
         if not force and self.fitted and self._graph_cache_key == cache_key:
+            warnings.warn(
+                "Using a graph already materialized in memory; pass "
+                "`force=True` to rebuild it.",
+                UserWarning, stacklevel=3,
+            )
             return self.graph
         return None
 
@@ -347,20 +301,37 @@ class GraphGenerator:
     ) -> ConceptGraph:
         """Construct, refine, validate, and retain the resulting graph.
 
-        Fixed generators may reuse an in-memory materialization. Learnable
-        generators always materialize their latest ``forward`` snapshot; disk
-        persistence is handled only by fixed-graph ``precompute_graph``.
-        Concept descriptions are bound once before either generation path.
+        Complete in-memory graphs are reused only when method, dataset,
+        refinement and (for learnable generators) parameter
+        versions still match. ``force=True`` bypasses that cache and also
+        refreshes a learnable adjacency. Disk persistence is handled only by
+        fixed-graph ``precompute_graph``.
         """
-        self._bind_context(dataset)
-        cache_key = None
-        if not self.trainable:
-            cache_key = self._cache_key(dataset)
-            cached = self._cached_graph(cache_key, force)
-            if cached is not None:
-                return cached
+        self._resolve_context(dataset)
+        cache_key = self._cache_key(dataset)
+        # if source, name or dataset changes, we may need to rebuild the graph. Not only materialize it. Warning message.
+        context = (self.source, self.name, cache_key[4])
+        previous_context = getattr(self, "_materialization_context", None)
+        if self.trainable and previous_context not in (None, context):
+            warnings.warn(
+                "The dataset, source, or method of a learnable graph generator "
+                "changed. Rebuilding the graph does not retrain its parameters; "
+                "rerun the complete training pipeline for the new context.",
+                UserWarning, stacklevel=2,
+            )
 
-        generated = self._graph_source(dataset)
+        cached = self._cached_graph(cache_key, force)
+        if cached is not None:
+            return cached
+
+        if self.trainable:
+            with torch.no_grad():
+                generated = self()
+            cache_key = self._cache_key(dataset)
+        else:
+            if dataset is None:
+                raise ValueError("Fixed graph construction requires a dataset.")
+            generated = self._spec.compute(self, dataset)
         if isinstance(generated, ConceptGraph):
             graph = generated
         elif isinstance(generated, torch.Tensor):
@@ -380,11 +351,15 @@ class GraphGenerator:
                 "Graph generator callbacks must return ConceptGraph or Tensor."
             )
 
-        graph = self._refine(graph)
+        if self._spec.refinement is not None:
+            graph = self._spec.refinement(graph)
+            if not isinstance(graph, ConceptGraph):
+                raise TypeError("Refinement must return a ConceptGraph.")
         self._validate_graph(graph)
         self.graph = graph
         self.fitted = True
         self._graph_cache_key = cache_key
+        self._materialization_context = context
         return graph
 
     def __repr__(self) -> str:
@@ -399,7 +374,7 @@ class GraphGenerator:
 class GraphGeneratorSpec:
     """Options shared by fixed and learnable graph sources."""
 
-    refinement: Optional[Callable] = None
+    refinement: Optional[Callable[[ConceptGraph], ConceptGraph]] = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -431,8 +406,7 @@ class GraphGeneratorLearnable(GraphGenerator, nn.Module):
     strategies. Every source must provide ``random``, which is selected by
     default. Data are accepted only by strategies declaring that they require
     them. :meth:`construct_graph` materializes a detached
-    :class:`ConceptGraph` snapshot and records it in the shared generator state. Optional refinement is currently supported only through an LLM
-    refiner.
+    :class:`ConceptGraph` snapshot and records it in the shared generator state. Optional refinement accepts a graph callable.
     """
 
     trainable = True
@@ -442,7 +416,7 @@ class GraphGeneratorLearnable(GraphGenerator, nn.Module):
         self,
         name: str,
         source: Optional[str] = None,
-        refinement: Optional[dict[str, Any]] = None,
+        refinement: Optional[Callable[[ConceptGraph], ConceptGraph]] = None,
         require_dag: bool = True,
         initialization: str = "random",
         initialization_data: Any = None,
@@ -457,15 +431,13 @@ class GraphGeneratorLearnable(GraphGenerator, nn.Module):
             concept_descriptions=concept_descriptions,
             **kwargs,
         )
-        self._apply_initialization(initialization, initialization_data)
         self.initialization = initialization
+        self._apply_initialization(initialization, initialization_data)
 
-    def _apply_initialization(
-        self,
-        strategy: str,
-        data: Any,
-    ) -> None:
-        """Apply the selected source initializer once, during construction."""
+    def _initialization_spec(
+        self, strategy: str,
+    ) -> GraphGeneratorInitializationSpec:
+        """Return and validate one initialization strategy."""
         initializers = self._spec.initializations
         if strategy not in initializers:
             supported = sorted(initializers)
@@ -473,7 +445,15 @@ class GraphGeneratorLearnable(GraphGenerator, nn.Module):
                 f"Unknown initialization {strategy!r} for source {self.source!r}; "
                 f"supported initializations: {supported}."
             )
-        spec = initializers[strategy]
+        return initializers[strategy]
+
+    def _apply_initialization(
+        self,
+        strategy: str,
+        data: Any,
+    ) -> None:
+        """Apply the selected source initializer."""
+        spec = self._initialization_spec(strategy)
         if spec.requires_data and data is None:
             raise ValueError(
                 f"Initialization {strategy!r} for source {self.source!r} "
@@ -490,31 +470,10 @@ class GraphGeneratorLearnable(GraphGenerator, nn.Module):
         """Return the current differentiable adjacency matrix."""
         adjacency = self._spec.forward(self)
         self.invalidate_cache()
-        self._forward_graph = adjacency.detach()
-        self._forward_parameter_versions = self._parameter_versions()
         return adjacency
 
     def _parameter_versions(self) -> tuple[int, ...]:
         return tuple(parameter._version for parameter in self.parameters())
-
-    def _graph_source(
-        self, dataset: Optional[ConceptDataset],
-    ) -> torch.Tensor:
-        versions = self._parameter_versions()
-        if not hasattr(self, "_forward_graph"):
-            raise RuntimeError(
-                "Cannot construct the learned graph because no forward "
-                "snapshot is available. Run the graph generator once after "
-                "training."
-            )
-        if self._forward_parameter_versions != versions:
-            raise RuntimeError(
-                "Cannot construct the learned graph because its forward "
-                "snapshot predates the latest parameter update. Run the graph "
-                "generator once after training."
-            )
-        return self._forward_graph
-
 
 # ------------------------------------------------------------------
 # DAGMA-CGM: CausalCGM's modified DAGMA adjacency
@@ -640,78 +599,11 @@ def _load_dagma_cgm_source(
         },
     )
 
-
-# ------------------------------------------------------------------
-# WANDA: differentiable graph generation
-# ------------------------------------------------------------------
-@torch.no_grad()
-def _initialize_wanda_random(
-    generator: GraphGeneratorLearnable, _data: Any,
-) -> None:
-    nn.init.normal_(generator.np_params, std=generator.priority_var)
-
-
-def _wanda_forward(
-    self: GraphGeneratorLearnable, _dataset=None,
-) -> torch.Tensor:
-    differences = self.np_params.T - self.np_params
-    identity = torch.eye(self.n_concepts, device=differences.device)
-    adjacency = differences * (1 - identity)
-
-    if not self.hard_threshold:
-        return adjacency
-
-    hard_adjacency = (differences > self.threshold).float()
-    hard_adjacency = torch.where(
-        hard_adjacency.abs() < self.eps,
-        torch.zeros_like(adjacency),
-        hard_adjacency,
-    )
-    return adjacency + (hard_adjacency - adjacency).detach()
-
-
-@GraphGeneratorLearnable.register_source("WANDA", names=["wanda"])
-def _load_wanda_source(
-    generator: GraphGeneratorLearnable,
-    name: str,
-    concept_names: List[str],
-    priority_var: float = 1.0,
-    hard_threshold: bool = True,
-    threshold_init: float = 0.0,
-    eps: float = 1e-12,
-    ) -> GraphGeneratorLearnableSpec:
-    if name != "wanda":
-        raise ValueError("The WANDA source supports only name='wanda'.")
-    if threshold_init < 0:
-        raise ValueError("threshold_init must be non-negative.")
-    generator.concept_names = list(concept_names)
-    generator.n_concepts = len(generator.concept_names)
-    generator.np_params = nn.Parameter(
-        torch.zeros(generator.n_concepts, 1)
-    )
-    generator.priority_var = priority_var / math.sqrt(2)
-    generator.register_buffer(
-        "threshold",
-        torch.full((generator.n_concepts,), threshold_init),
-    )
-    generator.hard_threshold = hard_threshold
-    generator.eps = eps
-    return GraphGeneratorLearnableSpec(
-        forward=_wanda_forward,
-        initializations={
-            "random": GraphGeneratorInitializationSpec(
-                _initialize_wanda_random,
-            ),
-        },
-    )
-
-
 class GraphGeneratorFixed(GraphGenerator):
     """Fixed graph generator.
 
-    A registered fixed source supplies the generation callback and may also
-    provide edge orientation for optional refinement. Currently only the LLM
-    source provides that callback. Calling :meth:`construct_graph` records the
+    A registered fixed source supplies the generation callback.
+    Calling :meth:`construct_graph` records the
     resulting graph in the common generator state.
     """
 
@@ -723,7 +615,7 @@ class GraphGeneratorFixed(GraphGenerator):
         self,
         name: str,
         source: Optional[str] = None,
-        refinement: Optional[dict[str, Any]] = None,
+        refinement: Optional[Callable[[ConceptGraph], ConceptGraph]] = None,
         require_dag: bool = True,
         concept_descriptions: Optional[dict[str, str]] = None,
         **kwargs: Any,
@@ -737,18 +629,6 @@ class GraphGeneratorFixed(GraphGenerator):
             **kwargs,
         )
 
-    def _cache_key(self, dataset: Optional[ConceptDataset]) -> Any:
-        refinement = None if self.refinement is None else (
-            self.refinement["source"], self.refinement["name"],
-        )
-        return (self.source, self.name, refinement, id(dataset))
-
-    def _graph_source(
-        self, dataset: Optional[ConceptDataset],
-    ) -> ConceptGraph | torch.Tensor:
-        if dataset is None:
-            raise ValueError("Fixed graph construction requires a dataset.")
-        return self._spec.compute(self, dataset)
 
 #
 # ------------------------------------------------------------------
@@ -888,35 +768,61 @@ def _compute_llm(
     self: GraphGeneratorFixed,
     dataset: ConceptDataset,
 ) -> ConceptGraph:
-    """Query the LLM for every concept pair."""
+    """Build a graph by querying the LLM for every concept pair."""
     concept_names = list(dataset.concept_names)
-    adjacency = _build_llm_adjacency(
-        self,
-        concept_names,
-        self._concept_descriptions,
-    )
+    adjacency = torch.zeros(len(concept_names), len(concept_names))
+    for i in range(len(concept_names)):
+        for j in range(i + 1, len(concept_names)):
+            concept_a, concept_b = concept_names[i], concept_names[j]
+            response = _query_pair(
+                self.llm_backend,
+                concept_a,
+                self._concept_descriptions.get(concept_a, ""),
+                concept_b,
+                self._concept_descriptions.get(concept_b, ""),
+                domain=self.domain, repeats=self.repeats,
+            )
+            if response == "A->B":
+                adjacency[i, j] = 1.0
+            elif response == "B->A":
+                adjacency[j, i] = 1.0
     return ConceptGraph(adjacency, node_names=concept_names)
 
 
-def _refine_llm_edges(
-    self: GraphGeneratorFixed,
+def refine_llm(
     graph: ConceptGraph,
+    *,
+    llm_backend: Callable[..., str],
+    domain: str = "",
+    concept_descriptions: Optional[dict[str, str]] = None,
+    repeats: int = 1,
 ) -> ConceptGraph:
-    """Use the LLM to orient each ambiguous edge pair."""
+    """Orient reciprocal edges, leaving absent and directed edges unchanged.
+
+    ``llm_backend`` is a configured callable accepting a prompt and ``repeats``.
+    Missing concept descriptions default to empty strings. Returns a new graph;
+    the input is unchanged. Bind keyword arguments with ``functools.partial``
+    to use this function as a generator's ``refinement`` callback.
+    """
+    if not callable(llm_backend):
+        raise TypeError("`llm_backend` must be callable.")
+    if not isinstance(repeats, int) or isinstance(repeats, bool) or repeats < 1:
+        raise ValueError("repeats must be a positive integer.")
+    descriptions = concept_descriptions or {}
     concept_names = list(graph.node_names)
-    descriptions = self._concept_descriptions
     adjacency = graph.data.clone()
-    for i in range(adjacency.shape[0]):
-        for j in range(i + 1, adjacency.shape[0]):
+    for i in range(len(concept_names)):
+        for j in range(i + 1, len(concept_names)):
             if adjacency[i, j] == 0 or adjacency[j, i] == 0:
                 continue
             concept_a, concept_b = concept_names[i], concept_names[j]
             response = _query_pair(
-                self,
+                llm_backend,
                 concept_a,
-                descriptions[concept_a],
+                descriptions.get(concept_a, ""),
                 concept_b,
-                descriptions[concept_b],
+                descriptions.get(concept_b, ""),
+                domain=domain, repeats=repeats,
             )
             if response == "A->B":
                 adjacency[i, j] = 1.0
@@ -927,38 +833,17 @@ def _refine_llm_edges(
     return ConceptGraph(adjacency, node_names=concept_names)
 
 
-def _build_llm_adjacency(
-    self: GraphGeneratorFixed,
-    concept_names: List[str],
-    concept_descriptions: dict[str, str],
-) -> torch.Tensor:
-    adjacency = torch.zeros(len(concept_names), len(concept_names))
-    for i in range(len(concept_names)):
-        for j in range(i + 1, len(concept_names)):
-            concept_a = concept_names[i]
-            concept_b = concept_names[j]
-            response = _query_pair(
-                self,
-                concept_a,
-                concept_descriptions[concept_a],
-                concept_b,
-                concept_descriptions[concept_b],
-            )
-            if response == "A->B":
-                adjacency[i, j] = 1.0
-            elif response == "B->A":
-                adjacency[j, i] = 1.0
-    return adjacency
-
-
 def _query_pair(
-    self: GraphGeneratorFixed,
+    llm_backend: Callable[..., str],
     concept_a: str,
     concept_a_description: str,
     concept_b: str,
     concept_b_description: str,
+    *,
+    domain: str = "",
+    repeats: int = 1,
 ) -> str:
-    domain_clause = f"in the domain of {self.domain}" if self.domain else ""
+    domain_clause = f"in the domain of {domain}" if domain else ""
     concept_a_details = _concept_details(concept_a, concept_a_description)
     concept_b_details = _concept_details(concept_b, concept_b_description)
 
@@ -972,7 +857,7 @@ def _query_pair(
             f"\nRelevant context:\n{context}\n" if context else ""
         ),
     )
-    response = self.llm_backend(prompt, repeats=self.repeats)
+    response = llm_backend(prompt, repeats=repeats)
     return _most_frequent_token(response)
 
 
@@ -1045,10 +930,11 @@ def _load_llm_source(
     }
     if api_key is not None:
         llm_options["api_key"] = api_key
-    self.llm_backend = llm_backend or _LiteLLMBackendWithMillisecondRetry(
-        model=name,
-        **llm_options,
-    )
+    if llm_backend is None:
+        from torch_concepts.data.concept_generator.llm_backends import LiteLLMBackend
+
+        llm_backend = LiteLLMBackend(model=name, **llm_options)
+    self.llm_backend = llm_backend
     if not callable(self.llm_backend):
         raise TypeError("`llm_backend` must be callable.")
     self.rag = rag
@@ -1098,11 +984,11 @@ def _load_llm_source(
         )
     return GraphGeneratorFixedSpec(
         compute=_compute_llm,
-        refinement=_refine_llm_edges,
     )
 
 __all__ = [
     "GraphGenerator",
+    "refine_llm",
     "GraphGeneratorSpec",
     "GraphGeneratorFixedSpec",
     "GraphGeneratorLearnableSpec",

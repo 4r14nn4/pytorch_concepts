@@ -1,4 +1,3 @@
-from optparse import Option
 from typing import Union, Optional
 
 import torch
@@ -86,10 +85,27 @@ class HyperlinearConceptEmbeddingToConcept(BaseConceptLayer):
         self.init_bias_mean = init_bias_mean
         self.init_bias_std = init_bias_std
 
+        self.input_annotations = (
+            in_concepts if isinstance(in_concepts, Annotations) else None
+        )
+        self.in_concepts = self.in_concepts_shape
+        self._input_cardinalities = None
+        self._input_types = None
+        hypernet_outputs = self.in_concepts_shape
+        if isinstance(in_concepts, Annotations):
+            self._input_cardinalities = tuple(in_concepts.cardinalities)
+            self._input_types = tuple(in_concepts.types)
+            hypernet_outputs = sum(
+                2 if type_name == "binary" else cardinality
+                for type_name, cardinality in zip(
+                    self._input_types, self._input_cardinalities,
+                )
+            )
+
         self.hypernet = MLP(
             input_size=in_embeddings,
             hidden_size=hidden_size,
-            output_size=in_concepts,
+            output_size=hypernet_outputs,
             activation=activation,
         )
 
@@ -124,6 +140,20 @@ class HyperlinearConceptEmbeddingToConcept(BaseConceptLayer):
         Returns:
             torch.Tensor: Output concepts of shape (batch_size, out_concepts).
         """
+        if self._input_cardinalities is not None:
+            pieces = []
+            start = 0
+            for type_name, cardinality in zip(
+                self._input_types, self._input_cardinalities,
+            ):
+                value = concepts[..., start:start + cardinality]
+                pieces.append(
+                    torch.cat([1 - value, value], dim=-1)
+                    if type_name == "binary" else value
+                )
+                start += cardinality
+            concepts = torch.cat(pieces, dim=-1)
+
         weights = self.hypernet(embeddings)
 
         out_concepts = torch.einsum('bc,bnc->bn', concepts, weights)

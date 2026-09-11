@@ -1410,6 +1410,44 @@ class TestConceptMetricsContinuousPaths(unittest.TestCase):
         result = m.compute()
         self.assertIn('x_mse', result)
 
+    def test_continuous_metrics_with_strided_mixed_targets(self):
+        """Continuous columns of mixed targets remain valid inputs to MSE."""
+        from torchmetrics.regression import MeanSquaredError
+        from torch_concepts.nn.modules.outputs import ModelOutput
+
+        ann = Annotations(
+            labels=['binary', 'category', 'x', 'y'],
+            cardinalities=[1, 3, 1, 1],
+            types=['binary', 'categorical', 'continuous', 'continuous'],
+        )
+        cont_ann = Annotations(
+            labels=['x', 'y'], cardinalities=[1, 1],
+            types=['continuous', 'continuous'],
+        )
+        # Cover ordinary mixed-target column slices and transposed predictions.
+        for transposed in (False, True):
+            with self.subTest(transposed=transposed):
+                target = torch.arange(24, dtype=torch.float32).reshape(6, 4)
+                prediction = target[:, 2:] + 1
+                if transposed:
+                    prediction = prediction.T.contiguous().T
+                out = ModelOutput()
+                out.loc = AnnotatedTensor(prediction, cont_ann, axis=-1)
+                out.target = AnnotatedTensor(
+                    target, ann.to_concept_space(), axis=-1)
+                self.assertFalse(out.target[['x', 'y']].tensor.is_contiguous())
+                if transposed:
+                    self.assertFalse(out.loc.tensor.is_contiguous())
+                metrics = ConceptMetrics(
+                    annotations=ann, binary={}, categorical={},
+                    continuous={'mse': MeanSquaredError()},
+                    summary=True, per_concept=['x', 'y'],
+                )
+                metrics.update(out)
+                results = metrics.compute()
+                for key in ('SUMMARY-continuous_mse', 'x_mse', 'y_mse'):
+                    self.assertAlmostEqual(results[key].item(), 1.0)
+
     # ------------------------------------------------------------------
     # compute() continuous branch — line 354
     # ------------------------------------------------------------------
