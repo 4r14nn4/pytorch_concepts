@@ -36,13 +36,8 @@ from .modules.low.encoders.cav import CAVEmbeddingToConcept
 from .modules.low.predictors.call import CallableConceptToConcept
 from .modules.low.predictors.hypernet import HyperlinearConceptEmbeddingToConcept
 from .modules.low.predictors.linear import LinearConceptToConcept
-from .modules.low.predictors.mix import (
-    MixConceptEmbeddingToConcept,
-    MixConceptEmbeddings,
-    MixConceptEmbeddingToConceptEmbedding,
-)
-from .modules.low.predictors.neural_structural_equations import NeuralStructuralEquations
-from .modules.utils import state_embedding_counts
+from .modules.low.predictors.mix import MixConceptEmbeddingToConcept, \
+    MixConceptEmbeddings
 
 # Dense layers
 from .modules.low.dense_layers import Dense, ResidualMLP, MLP, LinearEmbeddingEncoder, MLPEmbeddingEncoder, SelectorEmbeddingEncoder
@@ -53,8 +48,11 @@ from .modules.low.graph.wanda import WANDAGraphLearner
 
 # Loss functions
 from .modules.loss import PyCLoss, ConceptLoss, ConceptSubset, WeightedConceptLoss, \
-    DepthWeightedConceptLoss, L1LogitRegularizer, CompositeLoss, NLLProbLoss, \
-    CGMTrainingLoss, DAGMALoss, CACELoss
+    DepthWeightedConceptLoss, L1LogitRegularizer, CompositeLoss, \
+    MSEReconstructionLoss, KLDivergenceLoss, OrthogonalityLoss, NLLProbLoss
+
+# Training callbacks
+from .modules.callbacks import LossWeightWarmup
 
 # Metrics
 from .modules.metrics import ConceptMetrics, compute_cace
@@ -66,9 +64,10 @@ from .modules.outputs import ModelOutput, InferenceOutput
 from .modules.high.models.blackbox import BlackBox, BlackBoxTaskOnly
 from .modules.high.models.cbm import ConceptBottleneckModel
 from .modules.high.models.cem import ConceptEmbeddingModel
+from .modules.high.models.cbvae import ConceptBottleneckVAE
+from .modules.high.models.cvae import ConditionalVAE
 from .modules.high.models.graph_cbm import GraphConceptBottleneckModel
 from .modules.high.models.c2bm import CausallyReliableConceptBottleneckModel
-from .modules.high.models.cgm import CausalCGM
 
 # Models (mid-level)
 from .modules.mid.factors.factor import ParametricFactor
@@ -153,9 +152,6 @@ __all__ = [
     "HyperlinearConceptEmbeddingToConcept",
     "MixConceptEmbeddingToConcept",
     "MixConceptEmbeddings",
-    "MixConceptEmbeddingToConceptEmbedding",
-    "state_embedding_counts",
-    "NeuralStructuralEquations",
 
     # Dense layers
     "Dense",
@@ -177,10 +173,13 @@ __all__ = [
     "WeightedConceptLoss",
     "DepthWeightedConceptLoss",
     "L1LogitRegularizer",
+    "MSEReconstructionLoss",
+    "KLDivergenceLoss",
+    "OrthogonalityLoss",
     "NLLProbLoss",
-    "CGMTrainingLoss",
-    "DAGMALoss",
-    "CACELoss",
+
+    # Training callbacks
+    "LossWeightWarmup",
 
     # Metrics
     "ConceptMetrics",
@@ -195,9 +194,10 @@ __all__ = [
     "BlackBoxTaskOnly",
     "ConceptBottleneckModel",
     "ConceptEmbeddingModel",
+    "ConceptBottleneckVAE",
+    "ConditionalVAE",
     "GraphConceptBottleneckModel",
     "CausallyReliableConceptBottleneckModel",
-    "CausalCGM",
     # Models (mid-level)
     "ParametricFactor",
     "ParametricCPD",

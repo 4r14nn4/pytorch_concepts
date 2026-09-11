@@ -29,6 +29,7 @@ from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from .dataset import ConceptDataset
+from ..generation.base.pipeline import ConceptGenerationPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -88,9 +89,6 @@ class ConceptDataModule(LightningDataModule):
     pin_memory : bool, optional
         If True, the data loader will copy Tensors into pinned memory
         before returning them. Useful for GPU training. Default is False.
-    drop_last : bool, optional
-        If True, discard an incomplete final training batch. Validation and test
-        batches are never dropped. Default is True.
     seed : int or None, optional
         Seed controlling the ``max_samples`` subsampling and the train/val/test
         **split**, passed to the splitter. If None, both are non-deterministic.
@@ -162,7 +160,6 @@ class ConceptDataModule(LightningDataModule):
         splitter: Optional[object] = None,
         workers: int = 0,
         pin_memory: bool = False,
-        drop_last: bool = True,
         seed: Optional[int] = None
     ):
         super(ConceptDataModule, self).__init__()
@@ -180,12 +177,7 @@ class ConceptDataModule(LightningDataModule):
             if max_samples < n:
                 generator = torch.Generator().manual_seed(seed) if seed is not None else None
                 idx = torch.randperm(n, generator=generator)[:max_samples]
-                # File-list datasets (e.g., CelebA, CUB).
-                if isinstance(dataset.input_data, list):
-                    dataset.input_data = [dataset.input_data[i] for i in idx.tolist()]
-                else:
-                    dataset.input_data = dataset.input_data[idx]
-                dataset.concepts = dataset.concepts[idx]
+                dataset._subset_rows(idx)
                 # Record this so any cache can be keyed to them (see ``precompute_embeddings``).
                 dataset.is_subset, dataset.subset_seed = True, seed
                 if isinstance(splitter, FixedIndicesSplitter):
@@ -207,7 +199,6 @@ class ConceptDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.workers = workers
         self.pin_memory = pin_memory
-        self.drop_last = bool(drop_last)
 
         if scalers is not None:
             self.scalers = scalers
@@ -440,19 +431,19 @@ class ConceptDataModule(LightningDataModule):
             force=force,
         )
 
-    def precompute_graph(
-        self, graph_generator, cache: bool = True,
-        cache_dir: Optional[str] = None, force: bool = False,
-    ) -> None:
-        """Precompute a fixed graph on the underlying dataset."""
-        self.dataset.precompute_graph(
-            graph_generator, cache=cache,
-            cache_dir=cache_dir, force=force,
-        )
+    def generate_concepts(
+        self,
+        concept_pipeline: ConceptGenerationPipeline,
+        **kwargs,
+    ):
+        """Generate and annotate concepts on the underlying dataset.
 
-    def set_graph_generator(self, graph_generator) -> None:
-        """Register a learnable graph generator without precomputing it."""
-        self.dataset.set_graph_generator(graph_generator)
+        This is an explicit preprocessing step, parallel to
+        :meth:`precompute_embeddings`. All keyword arguments are forwarded to
+        :meth:`ConceptDataset.generate_concepts`, including generation options
+        and the generated source selected as ``concepts['c']``.
+        """
+        return self.dataset.generate_concepts(concept_pipeline, **kwargs)
 
     def setup(self, stage: StageOptions = None) -> None:
         """Prepare the data splits for training, validation, or testing.
@@ -489,6 +480,12 @@ class ConceptDataModule(LightningDataModule):
 
                 # Get the training data for the specified key (e.g., 'concepts' or 'input')
                 train_data = getattr(self.dataset, attr_name)
+                if key == 'concepts' and train_data is None:
+                    warnings.warn(
+                        "A 'concepts' scaler was configured but the dataset has "
+                        "no concept supervision; concept scaling is skipped."
+                    )
+                    continue
                 if isinstance(self.trainset, Subset):
                     train_data = train_data[self.trainset.indices]
 
@@ -506,6 +503,7 @@ class ConceptDataModule(LightningDataModule):
                 # Fit the scaler on the training data and store it in the dataset
                 scaler.fit(train_data)
                 self.dataset.add_scaler(key, scaler)
+
 
     def get_dataloader(self,
                        split: Literal['train', 'val', 'test'] = None,
@@ -538,8 +536,8 @@ class ConceptDataModule(LightningDataModule):
 
         Notes
         -----
-        Training DataLoaders use the data module's configurable
-        ``drop_last`` option; validation and test loaders never drop samples.
+        For training DataLoaders, ``drop_last=True`` is set to ensure
+        consistent batch sizes across iterations.
         """
         if split is None:
             dataset = self.dataset
@@ -558,7 +556,7 @@ class ConceptDataModule(LightningDataModule):
         return DataLoader(dataset,
                           batch_size=batch_size or self.batch_size,
                           shuffle=shuffle,
-                          drop_last=self.drop_last if split == 'train' else False,
+                          drop_last=split == 'train',
                           num_workers=self.workers,
                           pin_memory=pin_memory,
                           collate_fn=collate_fn)
