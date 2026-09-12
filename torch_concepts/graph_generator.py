@@ -20,11 +20,9 @@ Caching
 -------
 Only fixed graphs are cacheable. Calling ``precompute_graph`` with a
 :class:`GraphGeneratorFixed` may load a compatible graph from disk or compute,
-validate, and save a new one. Fixed generators also reuse their materialized
-graph in memory unless ``force=True``. Learnable generators are registered for
-end-to-end training instead: their graphs are never persisted or reused from a
-cache. After training, ``construct_graph`` materializes the latest valid
-``forward`` result and then applies refinement and validation.
+validate, and save a new one. Learnable generators are registered for
+end-to-end training instead. After training, ``construct_graph`` materializes
+the latest valid ``forward`` result and then applies refinement and validation.
 
 Concept descriptions
 --------------------
@@ -74,6 +72,7 @@ import re
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, List, Optional, Sequence
 
 import networkx as nx
@@ -114,6 +113,7 @@ def _query_pair(
     *,
     domain: str = "",
     repeats: int = 1,
+    max_attempts: int = 3,
 ) -> str:
     domain_clause = f"in the domain of {domain}" if domain else ""
     concept_a_details = _concept_details(concept_a, concept_a_description)
@@ -121,7 +121,7 @@ def _query_pair(
 
     context = ""
 
-    prompt = _PROMPT_TEMPLATE.format(
+    base_prompt = _PROMPT_TEMPLATE.format(
         domain_clause=domain_clause,
         concept_1_details=concept_a_details,
         concept_2_details=concept_b_details,
@@ -129,8 +129,32 @@ def _query_pair(
             f"\nRelevant context:\n{context}\n" if context else ""
         ),
     )
-    response = llm_backend(prompt, repeats=repeats)
-    return _most_frequent_token(response)
+    retry_suffix = ""
+    for attempt in range(1, max_attempts + 1):
+        prompt = base_prompt + retry_suffix
+        response = llm_backend(prompt, repeats=repeats)
+        try:
+            return _most_frequent_token(response)
+        except ValueError as error:
+            if attempt == max_attempts:
+                raise RuntimeError(
+                    "LLM did not return a valid edge token after "
+                    f"{max_attempts} attempts for pair "
+                    f"{concept_a!r}, {concept_b!r}. Last response: "
+                    f"{response!r}"
+                ) from error
+            warnings.warn(
+                "LLM returned no valid edge token for pair "
+                f"{concept_a!r}, {concept_b!r}; retrying "
+                f"({attempt}/{max_attempts}).",
+                UserWarning,
+                stacklevel=2,
+            )
+            retry_suffix = (
+                "\n\nYour previous response was invalid: "
+                f"{response!r}. Return only one of these exact tokens: "
+                "A->B, B->A, none."
+            )
 
 
 def _concept_details(name: str, description: str) -> str:
@@ -138,16 +162,17 @@ def _concept_details(name: str, description: str) -> str:
 
 
 def _most_frequent_token(response: Any) -> str:
-    """Return the majority token, using ``none`` for invalid votes or ties."""
-    raw_tokens = [
+    """Return the majority valid token, using ``none`` for valid-token ties."""
+    valid_tokens = [
         line.strip()
         for line in str(response).splitlines()
-        if line.strip()
+        if line.strip() in _EDGE_TOKENS
     ]
+    if not valid_tokens:
+        raise ValueError("LLM response contains no valid edge token.")
     counts = {token: 0 for token in _EDGE_TOKENS}
-    for token in raw_tokens:
-        vote = token if token in _EDGE_TOKENS else "none"
-        counts[vote] += 1
+    for token in valid_tokens:
+        counts[token] += 1
 
     highest_count = max(counts.values())
     winners = [token for token, count in counts.items() if count == highest_count]
@@ -157,6 +182,24 @@ def _most_frequent_token(response: Any) -> str:
 ################################################################################
 # Graph refinements
 ################################################################################
+
+def compose_refinements(
+    *refinements: Callable[[ConceptGraph], ConceptGraph],
+) -> Callable[[ConceptGraph], ConceptGraph]:
+    """Compose graph refinements left-to-right."""
+    if not refinements:
+        raise ValueError("At least one refinement is required.")
+    if not all(callable(refinement) for refinement in refinements):
+        raise TypeError("All refinements must be callable.")
+
+    def composed(graph: ConceptGraph) -> ConceptGraph:
+        for refinement in refinements:
+            graph = refinement(graph)
+        return graph
+
+    composed._refinements = tuple(refinements)
+    return composed
+
 
 def llm_refinement(
     llm_backend: Callable[..., str],
@@ -215,7 +258,7 @@ def refine_llm(
     return ConceptGraph(adjacency, node_names=concept_names)
 
 
-def project_dag(graph: ConceptGraph) -> ConceptGraph:
+def remove_weakest_cycles(graph: ConceptGraph) -> ConceptGraph:
     """Project an adjacency to a DAG as in the original CausalCGM."""
     node_names = list(graph.node_names)
     adjacency = graph.data.detach().clone()
@@ -243,6 +286,57 @@ def project_dag(graph: ConceptGraph) -> ConceptGraph:
                 candidates.argmin(), candidates.shape
             )
             adjacency[weakest] = 0
+
+def dfs_remove_cycles(
+    graph: ConceptGraph,
+    start_node: int | str | None = None,
+) -> ConceptGraph:
+    """Remove cycles by deleting the last edge visited before each cycle."""
+    node_names = list(graph.node_names)
+    adjacency = graph.data.detach().clone()
+    if start_node is None:
+        start_index = len(node_names) - 1
+    elif isinstance(start_node, str):
+        start_index = node_names.index(start_node)
+    else:
+        start_index = int(start_node)
+
+    def dfs(node: int, visited: list[bool], stack: list[bool], remove: bool) -> bool:
+        visited[node] = True
+        stack[node] = True
+        for neighbor in range(len(adjacency)):
+            if adjacency[neighbor][node] == 1:
+                if not visited[neighbor]:
+                    if dfs(neighbor, visited, stack, remove):
+                        return True
+                elif stack[neighbor]:
+                    if remove:
+                        adjacency[neighbor][node] = 0
+                        print(
+                            "The cycle has been broken by removing the edge: "
+                            f"{neighbor} -> {node}"
+                        )
+                    return True
+        stack[node] = False
+        return False
+
+    def contains_cycle() -> bool:
+        visited = [False] * len(adjacency)
+        stack = [False] * len(adjacency)
+        for node in range(len(adjacency)):
+            if not visited[node] and dfs(node, visited, stack, False):
+                return True
+        return False
+
+    if contains_cycle():
+        while contains_cycle():
+            visited = [False] * len(adjacency)
+            stack = [False] * len(adjacency)
+            dfs(start_index, visited, stack, True)
+    else:
+        print("there are no cycles in the graph, therefore the graph is left untouched")
+    return ConceptGraph(adjacency.to(dtype=torch.int), node_names=node_names)
+
 
 
 ################################################################################
@@ -386,7 +480,6 @@ class GraphGenerator:
         self.require_dag = bool(require_dag)
         self.graph: Optional[ConceptGraph] = None
         self.fitted = False
-        self._graph_cache_key: Any = None
         self._concept_descriptions = dict(concept_descriptions or {})
         if self.source not in self._sources:
             raise ValueError(
@@ -398,6 +491,10 @@ class GraphGenerator:
         if refinement is not None and not callable(refinement):
             raise TypeError("`refinement` must be callable or None.")
         self._spec = replace(spec, refinement=refinement)
+        refinement_descriptions = self._refinement_concept_descriptions(refinement)
+        if refinement_descriptions:
+            self._concept_descriptions.update(refinement_descriptions)
+            self._sync_refinement_context()
 
     @classmethod
     def register_source(
@@ -441,6 +538,7 @@ class GraphGenerator:
             )
             for name in dataset.concept_names
         }
+        self._sync_refinement_context()
 
     def _validate_graph(self, graph: ConceptGraph) -> None:
         if self.require_dag and not graph.is_directed_acyclic():
@@ -457,66 +555,125 @@ class GraphGenerator:
 
 
 
+
+
+    @staticmethod
+    def _refinement_concept_descriptions(refinement) -> dict[str, str]:
+        if hasattr(refinement, "_refinements"):
+            descriptions = {}
+            for nested in refinement._refinements:
+                descriptions.update(
+                    GraphGenerator._refinement_concept_descriptions(nested)
+                )
+            return descriptions
+        if not isinstance(refinement, partial):
+            return {}
+        descriptions = (refinement.keywords or {}).get("concept_descriptions")
+        return dict(descriptions or {})
+
+    def _sync_refinement_context(self) -> None:
+        refinement = self._spec.refinement
+        if refinement is None:
+            return
+
+        if hasattr(refinement, "_refinements"):
+            refinements = [
+                self._with_current_concept_descriptions(nested)
+                for nested in refinement._refinements
+            ]
+            self._spec = replace(
+                self._spec,
+                refinement=compose_refinements(*refinements),
+            )
+            return
+
+        updated = self._with_current_concept_descriptions(refinement)
+        if updated is not refinement:
+            self._spec = replace(self._spec, refinement=updated)
+
+    def _with_current_concept_descriptions(self, refinement):
+        if not isinstance(refinement, partial):
+            return refinement
+        if "concept_descriptions" not in (refinement.keywords or {}):
+            return refinement
+
+        keywords = dict(refinement.keywords or {})
+        keywords["concept_descriptions"] = dict(self._concept_descriptions)
+        return partial(refinement.func, *refinement.args, **keywords)
+
     def _cache_key(self, dataset) -> Any:
         """Identify a graph by configuration, dataset metadata and weight versions."""
-        refinement = self._spec.refinement
-        versions = self._parameter_versions() if self.trainable else None
-        dataset_key = self._dataset_cache_key(dataset)
-        return (
-            type(self).__name__, self.source, self.name, refinement,
-            dataset_key, versions,
-        )
+        key = {
+            "source": self.source,
+            "name": self.name,
+            "dataset": self._dataset_cache_key(dataset),
+            "refinement": self._refinement_cache_key(self._spec.refinement),
+        }
+        if self.trainable:
+            key["parameter_versions"] = self._parameter_versions()
+        return key
 
     @staticmethod
     def _dataset_cache_key(dataset) -> Optional[dict[str, Any]]:
         if dataset is None:
             return None
-        key = {
-            "class": f"{type(dataset).__module__}.{type(dataset).__qualname__}",
+        return {
+            "class": type(dataset).__qualname__,
             "name": getattr(dataset, "name", None),
             "concept_names": list(dataset.concept_names),
             "n_samples": dataset.n_samples,
             "is_subset": getattr(dataset, "is_subset", False),
             "subset_seed": getattr(dataset, "subset_seed", None),
+            "seed": getattr(dataset, "seed", None),
         }
-        if hasattr(dataset, "seed"):
-            key["seed"] = dataset.seed
-        return key
 
-    def _cached_graph(self, cache_key: Any, force: bool) -> Optional[ConceptGraph]:
-        if not force and self.fitted and self._graph_cache_key == cache_key:
-            warnings.warn(
-                "Using a graph already materialized in memory; pass "
-                "`force=True` to rebuild it.",
-                UserWarning, stacklevel=3,
-            )
-            return self.graph
-        return None
+    @staticmethod
+    def _refinement_cache_key(refinement) -> Optional[dict[str, Any]]:
+        if refinement is None:
+            return None
+        if hasattr(refinement, "_refinements"):
+            return {
+                "function": "compose_refinements",
+                "refinements": [
+                    GraphGenerator._refinement_cache_key(nested)
+                    for nested in refinement._refinements
+                ],
+            }
+        if isinstance(refinement, partial):
+            function = refinement.func
+            keywords = dict(refinement.keywords or {})
+        else:
+            function = refinement
+            keywords = {}
+        llm_backend = keywords.pop("llm_backend", None)
+        if llm_backend is not None:
+            keywords["llm_backend"] = {
+                "class": f"{type(llm_backend).__module__}.{type(llm_backend).__qualname__}",
+                "model": getattr(llm_backend, "model", None),
+            }
+        return {
+            "function": f"{function.__module__}.{function.__qualname__}",
+            "keywords": keywords,
+        }
+
 
     def invalidate_cache(self) -> None:
         """Discard the materialized graph without changing generator parameters."""
         self.graph = None
         self.fitted = False
-        self._graph_cache_key = None
 
     def construct_graph(
         self,
         dataset: Optional[ConceptDataset] = None,
-        *,
-        force: bool = False,
     ) -> ConceptGraph:
         """Construct, refine, validate, and retain the resulting graph.
 
-        Complete in-memory graphs are reused only when method, dataset,
-        refinement and (for learnable generators) parameter
-        versions still match. ``force=True`` bypasses that cache and also
-        refreshes a learnable adjacency. Disk persistence is handled only by
-        fixed-graph ``precompute_graph``.
+        Disk persistence is handled by dataset ``precompute_graph``.
         """
         self._resolve_context(dataset)
         cache_key = self._cache_key(dataset)
         # if source, name or dataset changes, we may need to rebuild the graph with training. Not only materialize it. Warning message.
-        context = (self.source, self.name, cache_key[4])
+        context = (self.source, self.name, cache_key["dataset"])
         previous_context = getattr(self, "_materialization_context", None)
         if self.trainable and previous_context not in (None, context):
             warnings.warn(
@@ -525,10 +682,6 @@ class GraphGenerator:
                 "rerun the complete training pipeline for the new context.",
                 UserWarning, stacklevel=2,
             )
-
-        cached = self._cached_graph(cache_key, force)
-        if cached is not None:
-            return cached
 
         if self.trainable:
             with torch.no_grad():
@@ -564,7 +717,6 @@ class GraphGenerator:
         self._validate_graph(graph)
         self.graph = graph
         self.fitted = True
-        self._graph_cache_key = cache_key
         self._materialization_context = context
         return graph
 
@@ -999,11 +1151,13 @@ __all__ = [
     "GraphGeneratorLearnableSpec",
     "GraphGeneratorLearnable",
     "GraphGeneratorFixed",
+    "compose_refinements",
     "entropy_initialization",
     "llm_refinement",
-    "project_dag",
     "random_initialization",
     "refine_llm",
+    "dfs_remove_cycles",
+    "remove_weakest_cycles",
 ]
 
 

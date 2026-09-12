@@ -445,6 +445,20 @@ class ConceptDataModule(LightningDataModule):
         """
         return self.dataset.generate_concepts(concept_pipeline, **kwargs)
 
+    def precompute_graph(
+        self, graph_generator, cache: bool = True,
+        cache_dir: Optional[str] = None, force: bool = False,
+    ) -> None:
+        """Precompute a fixed graph on the underlying dataset."""
+        self.dataset.precompute_graph(
+            graph_generator, cache=cache,
+            cache_dir=cache_dir, force=force,
+        )
+
+    def set_graph_generator(self, graph_generator) -> None:
+        """Register a learnable graph generator without precomputing it."""
+        self.dataset.set_graph_generator(graph_generator)
+
     def setup(self, stage: StageOptions = None) -> None:
         """Prepare the data splits for training, validation, or testing.
 
