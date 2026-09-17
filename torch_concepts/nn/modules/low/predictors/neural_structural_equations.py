@@ -142,32 +142,46 @@ class NeuralStructuralEquations(BaseConceptLayer):
     def forward(
         self, contexts, *, target_concept=None, target_concepts=None
     ):
-        """Parametrize all targets, one target, or a target plate."""
+        """Parametrize all targets, one target, or a selected target group.
+
+        Usually ``contexts`` has shape ``(..., n_concepts, embedding_dim)``.
+        The concept axis is the second-to-last one, so ``contexts[..., j, :]``
+        is the graph-aggregated parent context used to predict concept ``j``.
+
+        During evaluation a caller may already pass one target context with
+        shape ``(..., embedding_dim)`` together with ``target_concept=j``.
+        """
         if target_concept is not None and target_concepts is not None:
             raise ValueError(
                 "Pass either target_concept or target_concepts, not both."
             )
         self._validate_inputs(contexts, target_concept)
 
+        single_target_context = False
         if target_concept is not None:
             if not 0 <= target_concept < self.in_concepts:
                 raise IndexError(
                     f"target_concept must be in [0, {self.in_concepts}), "
                     f"got {target_concept}."
                 )
-            if contexts.shape[-2:] == (self.in_concepts, self.in_embeddings):
-                contexts = contexts[..., target_concept, :]
-            return self._predict_target(contexts, target_concept)
+            targets = [target_concept]
+            single_target_context = contexts.shape[-1:] == (self.in_embeddings,)
+        elif target_concepts is not None:
+            targets = list(target_concepts)
+        else:
+            targets = list(range(self.in_concepts))
 
-        targets = (
-            range(self.in_concepts)
-            if target_concepts is None
-            else target_concepts
-        )
+        # Predict the selected targets. Each target has its own final head, so
+        # the only per-target work is selecting its context and applying that head.
         outputs = [
-            self._predict_target(contexts[..., target, :], target)
+            self._predict_target(
+                contexts if single_target_context else contexts[..., target, :],
+                target,
+            )
             for target in targets
         ]
+        if target_concept is not None:
+            return outputs[0]
         return torch.cat(outputs, dim=-1)
 
     def for_targets(self, targets):

@@ -58,17 +58,27 @@ class GraphAggregator(nn.Module):
             adjacency = adjacency[..., source_concepts, :]
         if source_embeddings.shape[-2] != adjacency.shape[-2]:
             raise ValueError("source embeddings and adjacency rows must match.")
+        # Match the original CGM equation layer:
+        #   source_embeddings:          (..., source, embedding)
+        #   source_embeddings_by_dim:   (..., embedding, source)
+        #   adjacency:                  (..., source, target)
+        #   aggregated_by_dim:          (..., embedding, target)
+        #   aggregated:                 (..., target, embedding)
+        #
+        # For each target j this computes:
+        #   aggregated[..., j, :] = sum_i adjacency[..., i, j] * embedding_i
+        source_embeddings_by_dim = source_embeddings.transpose(-2, -1)
+        aggregated_by_dim = torch.matmul(source_embeddings_by_dim, adjacency)
+        aggregated = aggregated_by_dim.transpose(-2, -1)
+
         if target_concept is not None:
             n_targets = adjacency.shape[-1]
             if not 0 <= target_concept < n_targets:
                 raise IndexError(
                     f"target_concept must be in [0, {n_targets}), got {target_concept}."
                 )
-            return torch.einsum(
-                "...se,...s->...e", source_embeddings,
-                adjacency[..., :, target_concept],
-            )
-        return torch.einsum("...se,...st->...te", source_embeddings, adjacency)
+            return aggregated[..., target_concept, :]
+        return aggregated
 
 
 __all__ = ["GraphAggregator"]
