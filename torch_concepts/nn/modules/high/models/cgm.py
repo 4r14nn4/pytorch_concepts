@@ -1,4 +1,4 @@
-"""Causal Concept Graph Model with joint structure and parameter learning."""
+"""Causal Concept Graph Model and its model-specific helper functions."""
 
 from __future__ import annotations
 
@@ -13,7 +13,10 @@ from torch.distributions import Bernoulli, Normal, OneHotCategorical
 
 from .....annotations import Annotations
 from .....concept_graph import ConceptGraph
-from .....construct_graph import GraphGeneratorLearnable
+from .....graph_generator import (
+    GraphGeneratorLearnable,
+    remove_weakest_cycles,
+)
 from .....distributions import Delta
 from .....utils import ensure_list
 from ...low.dense_layers import MLP
@@ -41,38 +44,12 @@ from ...outputs import ModelOutput
 from ..base.graph import DirectedGraphModel
 
 
-def _project_to_dag(graph: ConceptGraph) -> ConceptGraph:
-    """Project an adjacency to a DAG as in the original CausalCGM."""
-    node_names = list(graph.node_names)
-    adjacency = graph.data.detach().clone()
-    while True:
-        graph = nx.from_numpy_array(
-            adjacency.cpu().numpy(), create_using=nx.DiGraph
-        )
-        try:
-            list(nx.topological_sort(graph))
-            return ConceptGraph(adjacency, node_names=node_names)
-        except nx.NetworkXUnfeasible:
-            cyclic_edges = {
-                edge
-                for component in nx.strongly_connected_components(graph)
-                if len(component) > 1
-                for edge in graph.subgraph(component).edges
-            }
-            candidates = adjacency.clone()
-            candidates[candidates == 0] = 100
-            mask = torch.ones_like(candidates, dtype=torch.bool)
-            for edge in cyclic_edges:
-                mask[edge] = False
-            candidates[mask] = 100
-            weakest = torch.unravel_index(
-                candidates.argmin(), candidates.shape
-            )
-            adjacency[weakest] = 0
-
+# ---------------------------------------------------------------------------
+# Helper functions used only by CausalCGM
+# ---------------------------------------------------------------------------
 
 class _CGMInterventionPolicy(BaseInterventionPolicy):
-    """Select explicit flattened concept columns per batch row."""
+    """Helper policy that selects flattened concept columns per batch row."""
 
     def __init__(self, indices: torch.Tensor):
         super().__init__()
@@ -86,7 +63,7 @@ class _CGMInterventionPolicy(BaseInterventionPolicy):
 
 
 def _select_params(output, names, prefix=""):
-    """Select named variable views and optionally prefix their quantities."""
+    """Helper function that selects variables and optionally prefixes quantities."""
     selected = {}
     for quantity, tensor in output.params.items():
         labels = {
@@ -99,20 +76,38 @@ def _select_params(output, names, prefix=""):
     return selected
 
 
-class CausalCGM(DirectedGraphModel):
-    """CGM trained as local conditionals and unfolded to an evaluation BN.
 
-    Training keeps the original exogenous contexts ``U`` and independent
-    copies ``V_prime``. Endogenous variables are grouped into the minimum
-    number of homogeneous plates, so each plate mixes its inputs, aggregates
-    the graph, and evaluates its structural equations once. The learned or
-    fixed adjacency is produced by a neural graph layer, not by an extra PGM variable.
-    Structural equations use a shared transform followed by child-specific
-    MLPs. Because the relaxed adjacency may be cyclic, these plate conditionals
-    form the training objective. During evaluation the adjacency
-    is projected to a DAG and unfolded into a :class:`BayesianNetwork`, queried
-    directly by the configured inference engine.
-    For more details, see the `paper <https://arxiv.org/abs/2405.16507>`_.
+# ---------------------------------------------------------------------------
+# CausalCGM model
+# ---------------------------------------------------------------------------
+
+
+class CausalCGM(DirectedGraphModel):
+    """Causal CGM with joint graph and mechanism learning.
+
+    The training PGM contains three specific variable families:
+
+    - ``U``: one exogenous context extracted from the input for each concept;
+    - ``V_prime``: independent concept copies, predicted from ``U`` and set to
+      the ground truth through teacher forcing;
+    - ``V``: the endogenous concepts predicted from ``U`` and ``V_prime``
+      through the current graph and the structural equations.
+
+    Concepts in ``V`` with the same type and cardinality share a plate so their
+    common mixer, graph aggregation, and structural computation run together.
+    During training, the mechanisms and, when present, ``graph_generator`` are
+    optimized jointly. A fixed DAG can instead be passed through ``graph``.
+
+    During evaluation, a learned adjacency is materialized as a DAG, while a
+    supplied DAG is used directly. The graph is unfolded into a Bayesian network:
+    the auxiliary copies ``V_prime`` are removed and their learned mechanisms are
+    installed on the corresponding endogenous variables ``V``. The resulting
+    network is queried with the configured evaluation inference. For learned
+    graphs, the pruned DAG defines traversal order and roots; non-root equations
+    retain raw edges from earlier nodes, matching the upstream implementation.
+    Thus the evaluation network can contain dependencies absent from ``graph``.
+
+    For details, see the `paper <https://arxiv.org/abs/2405.16507>`_.
 
     Parameters
     ----------
@@ -139,14 +134,16 @@ class CausalCGM(DirectedGraphModel):
     concept_activation : str, default "leaky_relu"
         Activation inside each concept-specific structural MLP.
     graph : Optional[ConceptGraph], default None
-        A pre-learned or otherwise fixed DAG. Pass either ``graph`` or
+        A pre-learned or otherwise fixed DAG. Its topology is used during
+        training and directly unfolded into the evaluation Bayesian network;
+        only the CGM mechanisms are optimized. Pass either ``graph`` or
         ``graph_generator``; when both are omitted, DAGMA-CGM is created.
     graph_generator : Optional[GraphGeneratorLearnable], default None
         Learnable graph generator; ``None`` creates the paper's DAGMA-CGM
         generator with its default configuration. Graph-specific options such
-        as ``no_out_task``, ``edges_to_check``, ``initialization``, and
-        ``initialization_data`` belong to the generator. If provided,
-        it must be a ``GraphGeneratorLearnable``.
+        as ``no_out_task``, ``edges_to_check``, and ``initialization`` belong
+        to the generator. If provided, it must be a
+        ``GraphGeneratorLearnable``.
     inference : Optional[type[BaseInference]], default DeterministicInference
         Inference engine class for evaluation (see :class:`BaseInference`).
     inference_kwargs : Optional[dict], default None
@@ -154,8 +151,7 @@ class CausalCGM(DirectedGraphModel):
     train_inference : Optional[type[BaseInference]], default IndependentInference
         Inference engine for the training Bayesian network.
     train_inference_kwargs : Optional[dict], default None
-        Keyword arguments for the training inference engine; teacher forcing
-        Keyword arguments forwarded unchanged to the training engine.
+        Keyword arguments forwarded unchanged to the training inference engine.
     run_interventions : bool, default True
         If True, each training forward also evaluates the random intervention
         scenarios used by the CACE regularizer. Disable this to compute only
@@ -205,9 +201,10 @@ class CausalCGM(DirectedGraphModel):
             graph_generator = GraphGeneratorLearnable(
                 name="dagma_cgm",
                 source="DAGMA_CGM",
-                refinement=_project_to_dag,
                 concept_names=list(annotations.labels),
                 task_names=task_names,
+                refinement=remove_weakest_cycles,
+                initialization=lambda generator: None,
             )
         super().__init__(
             input_size=input_size,
@@ -216,6 +213,17 @@ class CausalCGM(DirectedGraphModel):
             plate=True,
             graph=graph,
             **kwargs,
+        )
+        self.embedding_size = embedding_size
+        self._shared_encoder = Sequential(
+            self.backbone,
+            MLP(
+                self.latent_size,
+                self.embedding_size,
+                output_size=self.embedding_size,
+                n_layers=2,
+                activation="leaky_relu",
+            ),
         )
         self.task_names = task_names
         self.copy_names = [f"{name}__copy" for name in self.concept_names]
@@ -229,7 +237,6 @@ class CausalCGM(DirectedGraphModel):
             index for index, name in enumerate(self.concept_names)
             if name not in self.task_names
         ]
-        self.embedding_size = embedding_size
         self.structural_equation_kwargs = {
             "shared_n_layers": shared_n_layers,
             "shared_hidden_size": shared_hidden_size,
@@ -258,7 +265,6 @@ class CausalCGM(DirectedGraphModel):
             generator=graph_generator,
             adjacency=None if graph_generator is not None else self.graph.data,
         )
-        self._graph_generator_validated = False
         configure_loss_terms = getattr(
             getattr(self, "loss", None), "configure_terms", None
         )
@@ -269,12 +275,23 @@ class CausalCGM(DirectedGraphModel):
         if self.graph_generator is not None:
             self._validate_graph_generator_compatibility()
         self._build_model()
+
+        # The training PGM now exists. Its inference engine can be created
+        # immediately; evaluation inference is created later, after the learned
+        # graph has been materialized as a DAG.
         self.setup_inference(
             inference or DeterministicInference,
             inference_kwargs,
             train_inference or IndependentInference,
             train_inference_kwargs,
         )
+        self.register_load_state_dict_post_hook(
+            lambda module, _incompatible_keys: module._invalidate_eval_pgm()
+        )
+
+    # ------------------------------------------------------------------
+    # Graph configuration and validation
+    # ------------------------------------------------------------------
 
     def _resolve_graph(self):
         """Use an empty DAG until the learned structure is materialized."""
@@ -287,16 +304,9 @@ class CausalCGM(DirectedGraphModel):
     def graph_generator(self):
         return self.graph_layer.generator
 
-    @property
-    def fixed_adjacency(self):
-        return self.graph_layer.fixed_adjacency
-
     def _adjacency(self) -> torch.Tensor:
         """Return the trainable or fixed graph adjacency."""
-        adjacency = self.graph_layer.graph()
-        if self.graph_generator is not None and not self._graph_generator_validated:
-            self._validate_graph_generator_compatibility(adjacency)
-        return adjacency
+        return self.graph_layer.graph()
 
     def _validate_graph_generator_compatibility(
         self, adjacency: Optional[torch.Tensor] = None,
@@ -329,46 +339,10 @@ class CausalCGM(DirectedGraphModel):
             raise ValueError(
                 "With no_out_task=True, task rows in the adjacency must be zero."
             )
-        self._graph_generator_validated = True
 
-    def _input_latent_block(self):
-        """Build the input and shared latent variables and their CPDs.
-
-        The extra MLP after the backbone matches the original CausalCGM encoder.
-        """
-        input_var = EmbeddingVariable(
-            "input", distribution=Delta, shape=self.input_size
-        )
-        shared_var = EmbeddingVariable(
-            "shared_embedding", distribution=Delta, size=self.embedding_size
-        )
-        shared_encoder = Sequential(
-            self.backbone,
-            MLP(
-                self.latent_size,
-                self.embedding_size,
-                output_size=self.embedding_size,
-                n_layers=2,
-                activation="leaky_relu",
-            ),
-        )
-        input_cpd = ParametricCPD(input_var, LearnablePrior(input_var.shape))
-        shared_cpd = ParametricCPD(
-            shared_var, shared_encoder, parents=[input_var]
-        )
-        return input_var, shared_var, input_cpd, shared_cpd
-
-    def build_concept_embedding_variables(
-        self, names, embedding_size, plate_name, name_fmt="{}_embedding",
-    ):
-        """Build one state-conditioned embedding bank per concept."""
-        return [
-            EmbeddingVariable(
-                name_fmt.format(name), distribution=Delta,
-                size=n_states * embedding_size,
-            )
-            for name, n_states in zip(names, self.n_state_embeddings)
-        ]
+    # ------------------------------------------------------------------
+    # Training PGM construction
+    # ------------------------------------------------------------------
 
     @property
     def mixer(self):
@@ -380,9 +354,29 @@ class CausalCGM(DirectedGraphModel):
 
     def _aggregate_inputs(
         self, inputs, *, exogenous, endogenous, sources, root=None,
+        empty_structural=False,
     ):
-        """Prepare the inputs consumed by a structural equation."""
+        """Collect parent embeddings and values for a structural equation."""
         if not sources:
+            if empty_structural:
+                reference = inputs[exogenous[root]]
+                leading_shape = reference.shape[:-1]
+                return {
+                    "concept_embeddings": [
+                        reference.new_zeros(
+                            *leading_shape,
+                            self.n_state_embeddings[root],
+                            self.embedding_size,
+                        )
+                    ],
+                    "concept_values": [
+                        reference.new_zeros(
+                            *leading_shape,
+                            self.cardinalities[root],
+                        )
+                    ],
+                    "source_concepts": [root],
+                }
             return inputs[exogenous[root]]
         aggregated = {
             "concept_embeddings": [
@@ -402,10 +396,40 @@ class CausalCGM(DirectedGraphModel):
             aggregated["source_concepts"] = sources
         return aggregated
 
+    def _input_latent_block(self):
+        """Build the input and shared latent variables and their CPDs.
+
+        The extra MLP after the backbone matches the original CausalCGM encoder.
+        """
+        input_var = EmbeddingVariable(
+            "input", distribution=Delta, shape=self.input_size
+        )
+        shared_var = EmbeddingVariable(
+            "shared_embedding", distribution=Delta, size=self.embedding_size
+        )
+        input_cpd = ParametricCPD(input_var, LearnablePrior(input_var.shape))
+        shared_cpd = ParametricCPD(
+            shared_var, self._shared_encoder, parents=[input_var]
+        )
+        return input_var, shared_var, input_cpd, shared_cpd
+
+    def _build_exogenous_variables(
+        self, names, embedding_size, name_fmt="{}_embedding",
+    ):
+        """Build one state-conditioned embedding variable per concept."""
+        return [
+            EmbeddingVariable(
+                name_fmt.format(name), distribution=Delta,
+                size=n_states * embedding_size,
+            )
+            for name, n_states in zip(names, self.n_state_embeddings)
+        ]
+
     def _build_model(self) -> None:
+        """Build the training PGM."""
         input_var, shared_var, self.input_cpd, self.shared_cpd = self._input_latent_block()
-        exogenous = self.build_concept_embedding_variables(
-            self.concept_names, self.embedding_size, "exogenous",
+        exogenous = self._build_exogenous_variables(
+            self.concept_names, self.embedding_size,
             name_fmt="{}__u",
         )
         endogenous = self.build_concept_variables(
@@ -485,7 +509,9 @@ class CausalCGM(DirectedGraphModel):
             )
             cpd = ParametricCPD(
                 variable,
-                self._flexible_parametrization(variable, equations, second="copy"),
+                self._flexible_parametrization(
+                    variable, equations, second="copy",
+                ),
                 parents=[*exogenous, *endogenous_copies],
                 aggregate=aggregate,
                 trunk=Sequential(self.mixer, self.graph_layer),
@@ -504,6 +530,10 @@ class CausalCGM(DirectedGraphModel):
             ],
         )
 
+    # ------------------------------------------------------------------
+    # Inference setup and evaluation PGM materialization
+    # ------------------------------------------------------------------
+
     def setup_inference(
         self,
         inference=None,
@@ -514,8 +544,7 @@ class CausalCGM(DirectedGraphModel):
         """Configure ordinary inference engines for the two CGM graphs.
 
         Training-specific graph inputs and intervention scenarios are prepared
-        by :meth:`_training_run` and :meth:`_training_interventions`; they are
-        deliberately not responsibilities of the inference engine.
+        by :meth:`_training_forward` and :meth:`_training_interventions`.
         """
         if train_inference is not None:
             super().setup_inference(
@@ -527,41 +556,78 @@ class CausalCGM(DirectedGraphModel):
             self._eval_inference_kwargs = dict(inference_kwargs or {})
 
     def materialize_graph(self):
-        """Materialize the learned graph through its generator pipeline."""
+        """Materialize the DAG defining evaluation order and root nodes."""
         if self.graph_generator is None:
-            graph = _project_to_dag(ConceptGraph(
-                self._adjacency(), node_names=self.concept_names,
-            ))
+            graph = ConceptGraph(
+                self._adjacency(),
+                node_names=self.concept_names,
+            )
         else:
             graph = self.graph_generator.construct_graph()
         self._set_graph(graph)
         return graph
 
     def materialize_bayesian_network(self):
-        """Materialize and install the evaluation Bayesian network."""
+        """Match upstream traversal while retaining its raw aggregation weights.
+
+        The pruned DAG determines order and roots. For non-roots, upstream
+        aggregates raw edges from already visited nodes; later nodes still
+        have zero embeddings. Encode those effective dependencies explicitly
+        so the evaluation Bayesian network remains acyclic.
+        """
+        raw_adjacency = self._adjacency().detach().clone()
         graph = self.materialize_graph()
         exogenous = [cpd.variable for cpd in self.exogenous_cpds]
         endogenous = [
             self._make_concept_variable(name) for name in self.concept_names
         ]
-        indices = {name: index for index, name in enumerate(self.concept_names)}
+        dag = nx.from_numpy_array(
+            graph.data.detach().cpu().numpy(), create_using=nx.DiGraph,
+        )
+        parent_indices = {
+            node: list(dag.predecessors(node))
+            for node in list(nx.topological_sort(dag))
+        }
+
         factors = []
-        for node, name in enumerate(self.concept_names):
-            parents = [
-                indices[parent] for parent in graph.get_predecessors(name)
+        visited = []
+        for node, parents in parent_indices.items():
+            is_root = len(parents) == 0
+            # The projected DAG defines traversal/root status. The original CGM
+            # still aggregates with the raw learned adjacency; at a given node,
+            # only already visited embeddings can contribute.
+            sources = [] if is_root else [
+                source for source in visited
+                if raw_adjacency[source, node] != 0
             ]
 
-            aggregate = partial(
-                self._aggregate_inputs,
-                exogenous=exogenous,
-                endogenous=endogenous,
-                sources=parents,
-                root=node,
-            )
+            if not is_root and not sources:
+                aggregate = partial(
+                    self._aggregate_inputs,
+                    exogenous=exogenous,
+                    endogenous=endogenous,
+                    sources=(),
+                    root=node,
+                    empty_structural=True,
+                )
+                factor_parents = [exogenous[node]]
+            else:
+                aggregate = partial(
+                    self._aggregate_inputs,
+                    exogenous=exogenous,
+                    endogenous=endogenous,
+                    sources=sources,
+                    root=node,
+                )
+                factor_parents = (
+                    [exogenous[node]] if is_root else
+                    [*(exogenous[i] for i in sources),
+                     *(endogenous[i] for i in sources)]
+                )
 
             parametrization = (
                 dict(self.endogenous_copy_cpds[node].parametrization)
-                if not parents else
+                if is_root else
                 self._flexible_parametrization(
                     endogenous[node],
                     self.structural_equations.for_targets([node]),
@@ -570,17 +636,14 @@ class CausalCGM(DirectedGraphModel):
             )
             factors.append(ParametricCPD(
                 endogenous[node], parametrization,
-                parents=(
-                    [exogenous[node]] if not parents else
-                    [*(exogenous[i] for i in parents),
-                     *(endogenous[i] for i in parents)]
-                ),
+                parents=factor_parents,
                 aggregate=aggregate,
-                trunk=None if not parents else Sequential(
+                trunk=None if is_root else Sequential(
                     self.mixer,
-                    GraphAggregator(adjacency=graph.data),
+                    GraphAggregator(adjacency=raw_adjacency),
                 ),
             ))
+            visited.append(node)
 
         prefix_cpds = [self.input_cpd, self.shared_cpd, *self.exogenous_cpds]
         eval_pgm = BayesianNetwork(
@@ -597,23 +660,26 @@ class CausalCGM(DirectedGraphModel):
         self._eval_pgm_stale = False
         return eval_pgm
 
-    def train(self, mode: bool = True):
-        """Refresh the evaluation model only when leaving training mode."""
-        was_training = self.training
-        result = super().train(mode)
-        if was_training and not mode and hasattr(self, "_eval_inference_cls"):
-            self.materialize_bayesian_network()
-        return result
+    def _invalidate_eval_pgm(self):
+        """Mark the materialized evaluation graph as derived from stale weights."""
+        self._eval_pgm_stale = True
+        if hasattr(self, "graph_layer"):
+            self.graph_layer.clear()
 
     def _apply(self, fn):
+        """Invalidate the evaluation PGM after a device or dtype change."""
         result = super()._apply(fn)
         if hasattr(self, "eval_pgm"):
-            self._eval_pgm_stale = True
+            self._invalidate_eval_pgm()
         return result
+
+    # ------------------------------------------------------------------
+    # Training query and intervention helpers
+    # ------------------------------------------------------------------
 
     @cached_property
     def _query_plan(self):
-        """Map concept ground truth to the teacher-forced copy variables, to query inference during training."""
+        """Map target columns to the copy variables used during training."""
         axis = self.concept_annotations
         return [
             (
@@ -623,20 +689,8 @@ class CausalCGM(DirectedGraphModel):
             for copy_name, name in zip(self.copy_names, self.concept_names)
         ]
 
-    def _training_run(self, source_values, evidence, **kwargs):
-        """Execute one training query through the endogenous plate CPDs."""
-        query = {
-            **dict(zip(self.copy_names, source_values)),
-            **dict.fromkeys(self.concept_names),
-        }
-        return self.train_inference.query(
-            query=query,
-            evidence=evidence,
-            **kwargs,
-        )
-
     def _training_interventions(self, observed):
-        """Build the random intervention scenarios from the original CGM.
+        """Helper that builds the random training intervention scenarios.
 
         One non-task concept is selected independently in every batch row.
         Binary concepts generate low/high scenarios; homogeneous categorical
@@ -713,19 +767,27 @@ class CausalCGM(DirectedGraphModel):
         return {}
 
     def _training_forward(self, query, evidence, **kwargs):
-        """Assemble prior, posterior, graph, and optional intervention output."""
-        source_names = self.copy_names
-        observed = [query[name] for name in source_names]
-        self.graph_layer.clear()
-        if self.graph_generator is not None and not self._graph_generator_validated:
-            self._adjacency()
-        output = self._training_run(observed, evidence, **kwargs)
+        """Run training inference and assemble the quantities required by the loss."""
+        self._invalidate_eval_pgm()
+        output = self.inference.query(
+            query=query,
+            evidence=evidence,
+            **kwargs,
+        )
         adjacency = self.graph_layer.adjacency
         params = _select_params(output, self.concept_names)
-        params.update(_select_params(output, source_names, "prior_"))
+        params.update(_select_params(output, self.copy_names, "prior_"))
         if self.run_interventions:
+            observed = [query[name] for name in self.copy_names]
             for label, values in self._training_interventions(observed).items():
-                intervened = self._training_run(values, evidence, **kwargs)
+                intervened = self.inference.query(
+                    query={
+                        **dict(zip(self.copy_names, values)),
+                        **dict.fromkeys(self.concept_names),
+                    },
+                    evidence=evidence,
+                    **kwargs,
+                )
                 params.update(_select_params(
                     intervened, self.concept_names, f"{label}_",
                 ))
@@ -734,6 +796,10 @@ class CausalCGM(DirectedGraphModel):
             params=params,
             extra={"task_names": tuple(self.task_names)},
         )
+
+    # ------------------------------------------------------------------
+    # Public forward and default query
+    # ------------------------------------------------------------------
 
     def forward(
         self, query=None, evidence=None, input=None, target=None, **inference_kwargs
@@ -744,14 +810,17 @@ class CausalCGM(DirectedGraphModel):
         input. Lightning may continue to pass the query prepared by its shared
         step. An explicit ``query`` remains available for advanced inference.
         """
-        if not self.training and getattr(self, "_eval_pgm_stale", False):
+        if not self.training and (
+            not hasattr(self, "eval_inference")
+            or getattr(self, "_eval_pgm_stale", False)
+        ):
             self.materialize_bayesian_network()
         if query is not None and target is not None:
             raise ValueError("Pass either `query` or `target`, not both.")
         if query is None:
             if self.training and target is None:
                 raise ValueError("CausalCGM training requires `target`.")
-            query = self.default_query(target)
+            query = self.default_query(target, "train" if self.training else "eval")
         if self.training:
             evidence = dict(evidence or {})
             if input is not None:
@@ -763,9 +832,19 @@ class CausalCGM(DirectedGraphModel):
             query=query, evidence=evidence, input=input, **inference_kwargs
         )
 
-    def default_query(self, ground_truth):
-        if self.training:
-            return super().fully_observed_query(ground_truth)
+    def default_query(self, ground_truth, step="train"):
+        """Build the CGM training/evaluation query.
+
+        During training, :class:`CausalCGM` teacher-forces the copy variables
+        from ``ground_truth`` through the model-specific ``_query_plan`` and
+        also inserts the original concept variables with ``None`` values so the
+        inference engine predicts them. During validation, testing, and direct
+        evaluation, only the original concept variables are queried unobserved.
+        """
+        if step == "train":
+            query = super().fully_observed_query(ground_truth)
+            query.update(dict.fromkeys(self.concept_names))
+            return query
         return dict.fromkeys(self.concept_names)
 
 
