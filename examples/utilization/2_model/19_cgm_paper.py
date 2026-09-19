@@ -19,6 +19,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
 from sklearn.metrics import accuracy_score
@@ -28,6 +29,7 @@ from torch_concepts import Annotations, seed_everything
 from torch_concepts.graph_generator import (
     GraphGeneratorLearnable,
     entropy_initialization,
+    fixed_dagma_initialization,
     remove_weakest_cycles,
 )
 from torch_concepts.data.base import ConceptDataModule, ConceptDataset
@@ -146,15 +148,15 @@ def make_models(datamodule, fit_target):
     """Create all paper-runner models for one seed and datamodule split.
 
     The learned CGM receives its initialized graph generator at construction
-    time. The given-graph CGM receives the known dSprites graph directly, so it
-    never creates or mutates a learnable generator.
+    time. The given-graph CGM mirrors the original runner by installing the
+    known dSprites DAG as a frozen DAGMA-CGM ``fc1`` weight.
     """
     input_size = datamodule.dataset.input_data.shape[1]
 
     def metrics():
         return ConceptMetrics(
             datamodule.annotations, summary=True, per_concept=[TASK],
-            binary={"accuracy": BinaryLogitAccuracy()},
+            binary={"accuracy": BinaryAccuracy()},
         )
 
     def backbone():
@@ -174,10 +176,18 @@ def make_models(datamodule, fit_target):
         refinement=remove_weakest_cycles,
         initialization=entropy_initialization(fit_target),
     )
+    given_graph_generator = GraphGeneratorLearnable(
+        name="dagma_cgm",
+        concept_names=LABELS,
+        task_names=[TASK],
+        threshold=GRAPH_THRESHOLD,
+        refinement=remove_weakest_cycles,
+        initialization=fixed_dagma_initialization(ADJACENCY),
+    )
     def baseline_loss():
         return WeightedConceptLoss(
             concept_weight=1.0, task_weight=1.0,
-            task_names=[TASK], binary=OriginalBinaryLoss(),
+            task_names=[TASK], binary=nn.BCEWithLogitsLoss(),
         )
     return {
         "CausalCGM": CausalCGM(
@@ -198,7 +208,7 @@ def make_models(datamodule, fit_target):
             annotations=datamodule.annotations,
             task_names=TASK,
             embedding_size=8,
-            graph=datamodule.graph,
+            graph_generator=given_graph_generator,
             run_interventions=True,
             lightning=True,
             loss=make_training_loss(),
@@ -236,31 +246,11 @@ def make_models(datamodule, fit_target):
     }
 
 
-class BinaryLogitAccuracy(BinaryAccuracy):
-    """Score binary logits exactly like the paper's thresholded probabilities."""
-
-    def update(self, preds, target):
-        super().update(preds.sigmoid(), target)
-
-
-class OriginalBinaryLoss(torch.nn.BCELoss):
-    """Match upstream sigmoid + BCE, including float32 saturation effects."""
-
-    def forward(self, input, target):
-        return super().forward(input.sigmoid(), target)
-
-
 def make_training_loss(lambda_cace=LAMBDA_CACE):
-    """Build the paper objective while keeping model outputs as logits.
-
-    The original implementation applies ``sigmoid`` before ``BCELoss``. The
-    torch-concepts model reports logits, so :class:`OriginalBinaryLoss` performs
-    the sigmoid inside the loss term while preserving the same numerical
-    behavior.
-    """
+    """Build the paper objective while keeping model outputs as logits."""
     prediction_loss = WeightedConceptLoss(
         concept_weight=1.0, task_weight=1.0, task_names=[TASK],
-        binary=OriginalBinaryLoss(),
+        binary=nn.BCEWithLogitsLoss(),
     )
     return CGMTrainingLoss(
         prediction_loss=prediction_loss,
@@ -463,48 +453,18 @@ def compute_pns_matrix(model, inputs, dag):
     return np.round(lower, 2), np.round(upper, 2)
 
 
-def mean_pns(matrices):
-    """Average PNS matrices while preserving structurally missing entries."""
-    stacked = np.stack(matrices)
-    valid = ~np.isnan(stacked)
-    totals = np.nansum(stacked, axis=0)
-    counts = valid.sum(axis=0)
-    return np.divide(
-        totals, counts, out=np.full_like(totals, np.nan), where=counts > 0,
-    )
-
-
-def plot_pns(upper, model_name):
-    """Plot the mean upper PNS bound, matching the paper visualization."""
-    fig, axis = plt.subplots(figsize=(6.5, 5.5), constrained_layout=True)
-    image = axis.imshow(
-        np.ma.masked_invalid(upper), cmap="Reds", vmin=0, vmax=1,
-    )
-    axis.set_title(f"PNS {model_name}")
-    axis.set_xticks(range(len(LABELS)), LABELS, rotation=45, ha="right")
-    axis.set_yticks(range(len(LABELS)), LABELS)
-    for row, column in zip(*np.where(~np.isnan(upper))):
-        axis.text(
-            column, row, f"{upper[row, column]:.2f}",
-            ha="center", va="center", fontsize=8,
-            color="white" if upper[row, column] >= 0.55 else "black",
-        )
-    fig.colorbar(image, ax=axis, shrink=0.8, label="PNS")
-    path = OUTPUT_DIR / "pns" / model_name
-    fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
-    plt.close(fig)
-
-
-def pns_rows(lower, upper, model_name, seed):
-    """Convert PNS matrices to a compact, analysis-friendly table."""
-    return [
-        {
-            "model": model_name, "seed": seed, "cause": LABELS[source],
-            "effect": LABELS[target], "pns_lower": lower[source, target],
-            "pns_upper": upper[source, target],
-        }
-        for source, target in zip(*np.where(~np.isnan(lower)))
-    ]
+def pns_pair_matrix(lower, upper):
+    """Serialize each PNS matrix entry as ``(lower, upper)``."""
+    matrix = []
+    for row in range(lower.shape[0]):
+        values = []
+        for column in range(lower.shape[1]):
+            if np.isnan(lower[row, column]) or np.isnan(upper[row, column]):
+                values.append(np.nan)
+            else:
+                values.append((lower[row, column], upper[row, column]))
+        matrix.append(values)
+    return matrix
 
 
 def evaluate(model, inputs, target):
@@ -623,9 +583,8 @@ def main():
     rows = []
     intervention_rows = []
     all_pns_rows = []
-    pns_upper_by_model = {}
+    original_pns_rows = []
     (OUTPUT_DIR / "graphs").mkdir(exist_ok=True)
-    (OUTPUT_DIR / "pns").mkdir(exist_ok=True)
     plot_graph(
         ADJACENCY, "dSprites DAG", OUTPUT_DIR / "graphs" / "given_graph",
     )
@@ -668,11 +627,19 @@ def main():
             pns_lower, pns_upper = compute_pns_matrix(
                 model, test_x, pns_graph,
             )
-            pns_upper_by_model.setdefault(name, [])
-            pns_upper_by_model[name].append(pns_upper)
-            all_pns_rows.extend(
-                pns_rows(pns_lower, pns_upper, name, seed),
-            )
+            original_pns_rows.append({
+                "dataset": "dsprites_dataset",
+                "model": name,
+                "seed": seed,
+                "PNS": str(pns_pair_matrix(pns_lower, pns_upper)),
+            })
+            for source, target in zip(*np.where(~np.isnan(pns_lower))):
+                all_pns_rows.append({
+                    "model": name, "seed": seed,
+                    "cause": LABELS[source], "effect": LABELS[target],
+                    "pns_lower": pns_lower[source, target],
+                    "pns_upper": pns_upper[source, target],
+                })
             if name == "CausalCGM":
                 plot_graph(
                     materialized_graph, "dSprites DAG",
@@ -700,11 +667,18 @@ def main():
     )
     pns_results = pd.DataFrame(all_pns_rows)
     pns_results.to_csv(OUTPUT_DIR / "pns.csv", index=False)
-    for model_name, matrices in pns_upper_by_model.items():
-        plot_pns(mean_pns(matrices), model_name)
+    pns_originalformat(original_pns_rows).to_csv(
+        OUTPUT_DIR / "pns_originalformat.csv", index=False,
+    )
     plot_acc_int(intervention_rows)
     accuracy_summary = (
         results.groupby("model")["label_accuracy"].agg(["mean", "std"]) * 100
+    )
+    cace_summary = results.groupby("model")["cace"].agg(
+        mean="mean", std="std", standard_error="sem",
+    )
+    cace_block_summary = results.groupby("model")["cace_block"].agg(
+        mean="mean", std="std", standard_error="sem",
     )
     results["residual_cace"] = np.divide(
         results["cace_block"], results["cace"],
@@ -712,25 +686,30 @@ def main():
         where=results["cace"].to_numpy() != 0,
     ) * 100
     residual_cace = results.groupby("model")["residual_cace"]
-    cace_summary = pd.DataFrame({
+    residual_cace_summary = pd.DataFrame({
         "mean": residual_cace.mean(),
         "standard_error": residual_cace.sem(),
     })
+    accuracy_summary.to_csv(OUTPUT_DIR / "results_summary.csv")
+    cace_summary.to_csv(OUTPUT_DIR / "cace_summary.csv")
+    cace_block_summary.to_csv(OUTPUT_DIR / "cace_block_summary.csv")
+    residual_cace_summary.to_csv(OUTPUT_DIR / "residual_cace_summary.csv")
+    print("Label accuracy (%)")
+    print(accuracy_summary.to_string())
+    print("\nCaCE")
+    print(cace_summary.to_string())
+    print("\nBlocked CaCE")
+    print(cace_block_summary.to_string())
+    print("\nResidual CaCE (%)")
+    print(residual_cace_summary.to_string())
     pns_upper = (
         pns_results.groupby(["model", "cause", "effect"])["pns_upper"]
         .mean().unstack("effect")
     )
-    accuracy_summary.to_csv(OUTPUT_DIR / "results_summary.csv")
-    cace_summary.to_csv(OUTPUT_DIR / "cace_summary.csv")
-    print("Label accuracy (%)")
-    print(accuracy_summary.to_string())
-    print("\nResidual CaCE (%)")
-    print(cace_summary.to_string())
     for model_name in pns_upper.index.get_level_values("model").unique():
         matrix = pns_upper.loc[model_name].reindex(
             index=LABELS, columns=LABELS,
         )
-        matrix.to_csv(OUTPUT_DIR / f"pns_upper_{model_name}.csv")
         print(f"\nPNS upper bound: {model_name}")
         print(matrix.to_string())
 
