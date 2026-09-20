@@ -766,7 +766,7 @@ class TestConceptDataModuleAddSet:
 
 
 # =============================================================================
-# Test ConceptDataModule DataLoader behavior (None splits, drop_last, pin_memory)
+# Test ConceptDataModule DataLoader behavior (None splits, DataLoader defaults, pin_memory)
 # =============================================================================
 
 class TestConceptDataModuleDataLoaderBehavior:
@@ -798,12 +798,12 @@ class TestConceptDataModuleDataLoaderBehavior:
         assert dm.valset is None
         assert dm.val_dataloader() is None
 
-    def test_train_dataloader_drop_last(self, toy_dataset):
-        """Train loader drops the last partial batch; val/test do not."""
+    def test_dataloaders_keep_pytorch_drop_last_default(self, toy_dataset):
+        """All loaders keep PyTorch's default handling for partial final batches."""
         dm = ConceptDataModule(dataset=toy_dataset, batch_size=16)
         dm.setup('fit')
 
-        assert dm.train_dataloader().drop_last is True
+        assert dm.train_dataloader().drop_last is False
         assert dm.val_dataloader().drop_last is False
         assert dm.test_dataloader().drop_last is False
 
