@@ -315,12 +315,14 @@ def remove_weakest_cycles(graph: ConceptGraph) -> ConceptGraph:
             list(nx.topological_sort(graph))
             return ConceptGraph(adjacency, node_names=node_names)
         except nx.NetworkXUnfeasible:
-            cyclic_edges = {
-                edge
-                for component in nx.strongly_connected_components(graph)
-                if len(component) > 1
-                for edge in graph.subgraph(component).edges
-            }
+            cyclic_edges = set()
+            for component in nx.strongly_connected_components(graph):
+                if len(component) <= 1:
+                    continue
+                for source in component:
+                    for target in graph.successors(source):
+                        if target in component:
+                            cyclic_edges.add((source, target))
             candidates = adjacency.clone()
             candidates[candidates == 0] = 100
             mask = torch.ones_like(candidates, dtype=torch.bool)
@@ -424,6 +426,24 @@ def entropy_initialization(data: Any) -> Callable[[Any], None]:
         adjacency.clamp_(0, 0.99)
         adjacency = adjacency.to(generator.fc1.weight)
         generator.fc1.weight.copy_(adjacency)
+
+    return initialize
+
+
+def fixed_dagma_initialization(adjacency: Any) -> Callable[[Any], None]:
+    """Return a DAGMA-CGM initializer with a frozen adjacency matrix."""
+    adjacency = torch.as_tensor(adjacency, dtype=torch.float32).clone()
+
+    @torch.no_grad()
+    def initialize(generator: Any) -> None:
+        if adjacency.shape != generator.fc1.weight.shape:
+            raise ValueError(
+                "Fixed DAGMA initialization adjacency must match "
+                f"fc1 weight shape {tuple(generator.fc1.weight.shape)}."
+            )
+        generator.fc1.weight.copy_(adjacency.to(generator.fc1.weight))
+        generator.fc1.weight.requires_grad_(False)
+        generator.edge_matrix.zero_()
 
     return initialize
 
@@ -1286,6 +1306,7 @@ __all__ = [
     "GraphGeneratorFixed",
     "compose_refinements",
     "entropy_initialization",
+    "fixed_dagma_initialization",
     "random_initialization",
     "refine_llm",
     "dfs_remove_cycles",

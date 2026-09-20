@@ -9,7 +9,7 @@ from torch import nn
 
 from .utils import TYPES, by_type, check_collection
 from .outputs import CONTINUOUS_QUANTITIES, ModelOutput, supervised_subset
-from ..functional import concept_orthogonality
+from ...annotations import Annotations
 from ...concept_graph import ConceptGraph
 from ...tensor import AnnotatedTensor
 from ..functional import cace_score
@@ -68,15 +68,10 @@ def _plain(tensor):
 def _normalize_loss_terms(terms, weights):
     """Normalize loss terms and weights to consistent list form.
     
-    A ``None`` entry in ``terms`` is dropped **together with its weight**, so a
-    term can be switched off in place — ``[recon, kl, ortho if use_unknown else
-    None]``.
-
     Args:
-        terms: A single nn.Module, a list of nn.Module (entries may be None),
-            or None.
-        weights: A list of floats, one per entry of ``terms``, or None.
-
+        terms: A single nn.Module, a list of nn.Module, or None.
+        weights: A list of floats, or None.
+        
     Returns:
         Tuple of (list_of_modules, list_of_weights), or (None, None) if terms is None.
     """
@@ -89,14 +84,22 @@ def _normalize_loss_terms(terms, weights):
             f"Loss terms must be an nn.Module or a list of nn.Module, got {type(terms)}"
         )
     if weights is None:
-        weights = [1.0] * len(terms)
-    if len(weights) != len(terms):
-         raise ValueError(
-            f"Number of weights ({len(weights)}) must match "
-            f"number of loss terms ({len(terms)})."
-        )
-    kept = [(t, w) for t, w in zip(terms, weights) if t is not None]
-    return [t for t, _ in kept], [w for _, w in kept]
+        pairs = [(term, 1.0) for term in terms if term is not None]
+    else:
+        if len(weights) != len(terms):
+            raise ValueError(
+                f"Number of weights ({len(weights)}) must match "
+                f"number of loss terms ({len(terms)})."
+            )
+        pairs = [
+            (term, weight)
+            for term, weight in zip(terms, weights)
+            if term is not None
+        ]
+    if not pairs:
+        return [], []
+    terms, weights = zip(*pairs)
+    return list(terms), list(weights)
 
 
 def subset_output(output: ModelOutput, names: List[str]) -> ModelOutput:
@@ -143,19 +146,6 @@ def _resolve_quantity(params, configured: Optional[str], candidates: Sequence[st
     return None
 
 
-def _variable_params(
-    params: Mapping[str, torch.Tensor], name: str
-) -> Dict[str, torch.Tensor]:
-    """The quantities reported for one variable, as plain tensors.
-
-    ``ModelOutput.params`` is quantity-keyed with every queried variable
-    concatenated on the annotated axis; ``params[name]`` is the variable-first
-    view of the same tensors (see :class:`ParamsDict`). The annotation is
-    dropped here: these go straight into a ``torch.distributions`` constructor.
-    """
-    return {q: _plain(t) for q, t in params[name].items()}
-
-
 class PyCLoss(nn.Module):
     """Base for every loss that is scored on a whole :class:`ModelOutput`.
 
@@ -183,10 +173,8 @@ class CompositeLoss(PyCLoss):
     terms with either signature compose freely.
 
     Args:
-        terms (list of nn.Module): The loss terms to sum. A ``None`` entry is
-            dropped with its weight, switching that term off in place.
-        weights (list of float, optional): Per-term weights, one per entry of
-            ``terms``. Defaults to all
+        terms (list of nn.Module): The loss terms to sum.
+        weights (list of float, optional): Per-term weights. Defaults to all
             ``1.0``. A plain mutable list, so a schedule such as
             :class:`~torch_concepts.nn.LossWeightWarmup` can rewrite one entry
             mid-training.
@@ -205,7 +193,7 @@ class CompositeLoss(PyCLoss):
         >>> from torch_concepts.nn import CompositeLoss, ConceptLoss, OrthogonalityLoss
         >>> loss_fn = CompositeLoss(
         ...     terms=[ConceptLoss(binary=torch.nn.BCEWithLogitsLoss()),
-        ...            OrthogonalityLoss('mixing', 'unknown', 2)],
+        ...            OrthogonalityLoss(variables=['mixing', 'unknown'])],
         ...     weights=[1.0, 0.5],
         ... )
         >>> loss_fn
@@ -215,9 +203,9 @@ class CompositeLoss(PyCLoss):
         :meth:`breakdown` read the way you think about them:
 
         >>> from torch_concepts.nn import (KLDivergenceLoss, NLLProbLoss,
-        ...                                MSEReconstructionLoss)
+        ...                                ReconstructionLoss)
         >>> loss_fn = CompositeLoss(
-        ...     terms=[MSEReconstructionLoss('input'),
+        ...     terms=[ReconstructionLoss('input'),
         ...            KLDivergenceLoss(['z']),
         ...            ConceptLoss(categorical=NLLProbLoss())],
         ...     weights=[1.0, 1.0, 5.0],
@@ -234,9 +222,6 @@ class CompositeLoss(PyCLoss):
         names: Optional[List[str]] = None,
     ):
         super().__init__()
-        if names is not None and isinstance(terms, (list, tuple)):
-            # A dropped `None` term takes its name with it, as it does its weight.
-            names = [n for n, t in zip(names, terms) if t is not None]
         terms, weights = _normalize_loss_terms(terms, weights)
         if not terms:
             raise ValueError("CompositeLoss: `terms` must not be empty.")
@@ -279,179 +264,6 @@ class CompositeLoss(PyCLoss):
         return sum(self.breakdown(output, target).values())
 
 
-class MSEReconstructionLoss(PyCLoss):
-    """Squared error between an observed variable and its prediction.
-
-    The reconstruction term for a ``Delta`` observation. Summed over the event, 
-    then reduced over the batch. Weight it ``0.5`` to get the ``sigma=1`` Gaussian 
-    NLL's gradients.
-
-    Args:
-        variable (str): Observed variable to score against a ground truth evidence. 
-            The evidence is read from ``output.extra['evidence']`` 
-            (published by the learner's ``default_extra``). 
-        reduction (str): ``'mean'`` (default) or ``'sum'`` over the batch.
-
-    Example:
-        >>> from torch_concepts.nn import MSEReconstructionLoss
-        >>> MSEReconstructionLoss('input')
-        MSEReconstructionLoss(variable='input', reduction='mean')
-    """
-
-    def __init__(self, variable: str, reduction: str = "mean"):
-        super().__init__()
-        self.variable = variable
-        self.reduction = reduction
-
-    def extra_repr(self) -> str:
-        return f"variable={self.variable!r}, reduction={self.reduction!r}"
-
-    def forward(self, output: ModelOutput, target=None) -> torch.Tensor:
-        predicted = _plain(output.params["value"][self.variable])
-        observed = ((output.extra or {}).get("evidence") or {}).get(self.variable)
-        if observed is None:
-            raise ValueError(
-                f"MSEReconstructionLoss: no observed value for {self.variable!r}. "
-                "It must be supplied as evidence — the learner forwards its "
-                "evidence dict to the loss under `output.extra['evidence']`."
-            )
-        # The prediction is flat ``(*leading, size)`` while the observation may
-        # still carry its event shape (an image stays ``(B, C, H, W)``).
-        observed = observed.reshape(predicted.shape).to(predicted.dtype)
-
-        error = F.mse_loss(predicted, observed, reduction="none").sum(-1)
-        return getattr(error, self.reduction)()
-
-    
-#: Latent families this loss can build a ``kl_divergence`` for. A loss sees
-#: quantity-keyed tensors, never the ``Variable``, so the family has to be read
-#: off the reported parameter names.
-_KL_FAMILIES = {
-    frozenset({"loc", "scale"}): dist.Normal,
-    frozenset({"loc", "scale_tril"}): dist.MultivariateNormal,
-}
-
-class KLDivergenceLoss(PyCLoss):
-    """``KL(q ‖ p)`` between a variational guide and the model, per latent.
-
-    The regularising half of the ELBO (Eq. 1 of the paper). Guide parameters are
-    read from ``output.guide_params``, the prior's from ``output.params``. The
-    per-dimension divergence is averaged over the batch, floored at
-    ``free_bits``, then summed over the dimensions — at the default
-    ``free_bits=0`` that is exactly Eq. 1, since summing and averaging commute.
-
-    Args:
-        latents (list of str): Latent variable names to score.
-        distribution (type, optional): Family shared by guide and prior. Read
-            off the reported parameter names when omitted, which resolves the
-            continuous families; pass it when those names identify no single
-            family (every discrete family reports ``probs``/``logits``).
-        free_bits (float): Per-dimension floor in nats.
-            ``0.0`` (default) leaves the term untouched. Above it, a dimension
-            whose batch-mean KL is already under the floor contributes a
-            constant, so its gradient vanishes and nothing pushes it further
-            onto the prior — the guard against posterior collapse, which a
-            learnable prior (a CVAE's ``conditional_prior``) makes more likely.
-
-    Example:
-        >>> from torch_concepts.nn import KLDivergenceLoss
-        >>> KLDivergenceLoss(['z'])
-        KLDivergenceLoss(latents=['z'], free_bits=0.0)
-    """
-
-    def __init__(
-        self,
-        latents: Sequence[str],
-        distribution: Optional[type] = None,
-        free_bits: float = 0.0,
-    ):
-        super().__init__()
-        self.latents = list(latents)
-        self.distribution = distribution
-        self.free_bits = float(free_bits)
-
-    def extra_repr(self) -> str:
-        return f"latents={self.latents}, free_bits={self.free_bits}"
-
-    def forward(self, output: ModelOutput, target=None) -> torch.Tensor:
-        total = 0.0
-        for name in self.latents:
-            q = _variable_params(output.guide_params, name)
-            p = _variable_params(output.params, name)
-            family = self.distribution or _KL_FAMILIES.get(frozenset(q))
-            if family is None:
-                raise ValueError(
-                    f"KLDivergenceLoss: latent {name!r} reports {sorted(q)}, which "
-                    f"names no single family "
-                    f"({sorted(f.__name__ for f in _KL_FAMILIES.values())}). "
-                    "Pass `distribution=` explicitly."
-                )
-            kl = dist.kl_divergence(family(**q), family(**p))
-            per_dim = kl.reshape(-1, kl.shape[-1]).mean(0)
-            total = total + per_dim.clamp_min(self.free_bits).sum()
-        return total
-
-
-class OrthogonalityLoss(PyCLoss):
-    """Push a context away from an unsupervised residual by penalising their
-    absolute cosine similarity, via
-    :func:`~torch_concepts.nn.functional.concept_orthogonality`.
-
-    Args:
-        variable (str): Variable to be made orthogonal to the residual. A
-            ``Delta`` variable in the PGM, so reported under ``value``. Assumed
-            dimensions are (*leading_dims, ``n_concepts``*``embedding_size``),
-            which cover both the case of a single embedding and the case of
-            multiple embeddings.
-        residual (str): The residual variable, likewise a ``Delta``.
-        n_concepts (int): How many equal blocks ``variable`` splits into, one
-            per concept.
-        reduction (str): Over the batch. ``'mean'`` (default) or ``'sum'``.
-        ``'sum'`` is Eq. 5 of the reference paper and scales with batch size.
-
-    Example:
-        >>> from torch_concepts.nn import OrthogonalityLoss
-        >>> OrthogonalityLoss('concept_embs', 'unknown', 2)
-        OrthogonalityLoss(variable='concept_embs', residual='unknown', n_concepts=2, reduction='mean')
-    
-    References:
-        Ismail et al. "Concept Bottleneck Generative Models", ICLR 2024.
-        https://openreview.net/forum?id=L9U5MJJleF
-    """
-
-    def __init__(
-        self,
-        variable: str,
-        residual: str,
-        n_concepts: int,
-        reduction: str = "mean"
-    ):
-        super().__init__()
-        self.variable = variable
-        self.residual = residual
-        self.n_concepts = n_concepts
-        self.reduction = reduction
-
-    def extra_repr(self) -> str:
-        return (f"variable={self.variable!r}, residual={self.residual!r}, "
-                f"n_concepts={self.n_concepts}, reduction={self.reduction!r}")
-
-    def forward(self, output: ModelOutput, target=None) -> torch.Tensor:
-        value = output.params["value"]
-        contexts, residual = value[self.variable], value[self.residual]
-        if contexts.shape[-1] != self.n_concepts * residual.shape[-1]:
-            raise ValueError(
-                f"OrthogonalityLoss: {self.variable!r} is {contexts.shape[-1]} wide, "
-                f"but n_concepts={self.n_concepts} blocks of {self.residual!r} "
-                f"({residual.shape[-1]} wide) need "
-                f"{self.n_concepts * residual.shape[-1]}."
-            )
-        per_sample = concept_orthogonality(
-            contexts.unflatten(-1, (self.n_concepts, -1)), residual
-        )
-        return getattr(per_sample, self.reduction)()
-
-
 class NLLProbLoss(nn.Module):
     """Categorical negative log-likelihood for a model that reports ``probs``.
 
@@ -472,6 +284,16 @@ class NLLProbLoss(nn.Module):
         >>> loss_fn = ConceptLoss(categorical=NLLProbLoss())
         >>> loss_fn
         ConceptLoss(categorical=NLLProbLoss)
+
+        Stacked with a regulariser, and with a lower floor before the log:
+
+        >>> from torch_concepts.nn import L1LogitRegularizer
+        >>> loss_fn = ConceptLoss(
+        ...     categorical=[NLLProbLoss(eps=1e-6), L1LogitRegularizer(scale=0.01)],
+        ...     categorical_weights=[1.0, 0.1],
+        ... )
+        >>> loss_fn
+        ConceptLoss(categorical=[NLLProbLoss + 0.1*L1LogitRegularizer])
     """
 
     def __init__(self, eps: float = 1e-8):
@@ -1059,6 +881,115 @@ class L1LogitRegularizer(nn.Module):
             return self.scale * input[mask].abs().mean()
         return torch.zeros((), device=input.device)
 
+
+class MSEReconstructionLoss(PyCLoss):
+    """Squared-error reconstruction loss for deterministic observations.
+
+    The predicted observation is read from ``output.params[variable]['value']``;
+    the observed value is read from ``output.extra['evidence'][variable]``. The
+    event dimensions are summed before the batch reduction, matching the scale
+    of a unit-variance Gaussian negative log-likelihood up to its constant.
+    """
+
+    def __init__(self, variable: str = "input", reduction: str = "mean"):
+        super().__init__()
+        if reduction not in {"mean", "sum"}:
+            raise ValueError("reduction must be 'mean' or 'sum'.")
+        self.variable = variable
+        self.reduction = reduction
+
+    def extra_repr(self) -> str:
+        return f"variable={self.variable!r}, reduction={self.reduction!r}"
+
+    def forward(self, output: ModelOutput, target=None) -> torch.Tensor:
+        predicted = output.params[self.variable]["value"]
+        evidence = (output.extra or {}).get("evidence", {})
+        if self.variable not in evidence:
+            raise KeyError(
+                f"MSEReconstructionLoss expected output.extra['evidence']"
+                f"[{self.variable!r}]."
+            )
+        observed = evidence[self.variable]
+        predicted = _plain(predicted)
+        observed = observed.to(device=predicted.device, dtype=predicted.dtype)
+        observed = observed.reshape(*predicted.shape[:-1], -1)
+        per_example = F.mse_loss(predicted, observed, reduction="none").sum(-1)
+        return per_example.mean() if self.reduction == "mean" else per_example.sum()
+
+
+class KLDivergenceLoss(PyCLoss):
+    """KL divergence between variational guide and model parameters."""
+
+    def __init__(
+        self,
+        latents: Union[str, Sequence[str]],
+        free_bits: Optional[float] = None,
+        reduction: str = "mean",
+    ):
+        super().__init__()
+        if reduction not in {"mean", "sum"}:
+            raise ValueError("reduction must be 'mean' or 'sum'.")
+        self.latents = [latents] if isinstance(latents, str) else list(latents)
+        self.free_bits = free_bits
+        self.reduction = reduction
+
+    def extra_repr(self) -> str:
+        return (
+            f"latents={self.latents!r}, free_bits={self.free_bits!r}, "
+            f"reduction={self.reduction!r}"
+        )
+
+    @staticmethod
+    def _normal(params):
+        return dist.Normal(_plain(params["loc"]), _plain(params["scale"]))
+
+    def forward(self, output: ModelOutput, target=None) -> torch.Tensor:
+        terms = []
+        for latent in self.latents:
+            q = self._normal(output.guide_params[latent])
+            p = self._normal(output.params[latent])
+            kl = dist.kl_divergence(q, p)
+            if self.free_bits is not None:
+                kl = kl.clamp_min(self.free_bits)
+            terms.append(kl.sum(-1))
+        per_example = sum(terms[1:], terms[0])
+        return per_example.mean() if self.reduction == "mean" else per_example.sum()
+
+
+class OrthogonalityLoss(PyCLoss):
+    """Penalty for overlap between two value-valued latent blocks."""
+
+    def __init__(
+        self,
+        first: str = "mixing",
+        second: str = "unknown",
+        n_vectors: Optional[int] = None,
+        eps: float = 1e-8,
+    ):
+        super().__init__()
+        self.first = first
+        self.second = second
+        self.n_vectors = n_vectors
+        self.eps = eps
+
+    def extra_repr(self) -> str:
+        return (
+            f"first={self.first!r}, second={self.second!r}, "
+            f"n_vectors={self.n_vectors!r}"
+        )
+
+    def forward(self, output: ModelOutput, target=None) -> torch.Tensor:
+        first = _plain(output.params[self.first]["value"])
+        second = _plain(output.params[self.second]["value"])
+        if self.n_vectors is not None:
+            first = first.reshape(*first.shape[:-1], self.n_vectors, -1)
+        elif first.ndim == second.ndim:
+            first = first.unsqueeze(-2)
+        second = second.unsqueeze(-2) if second.ndim == first.ndim - 1 else second
+        first = F.normalize(first, dim=-1, eps=self.eps)
+        second = F.normalize(second, dim=-1, eps=self.eps)
+        return (first * second).sum(-1).pow(2).mean()
+
 class DAGMALoss(PyCLoss):
     """Log-determinant acyclicity penalty for a tensor or model output.
 
@@ -1072,6 +1003,10 @@ class DAGMALoss(PyCLoss):
 
     def forward(self, input) -> torch.Tensor:
         adjacency = input.params[self.param] if isinstance(input, ModelOutput) else input
+        # Match CGM's h_func, including its zero subgradient on pruned edges.
+        # The adjacency uses a straight-through mask: a zero forward value can
+        # still carry a gradient, so this abs is not redundant for nonnegative A.
+        adjacency = adjacency.abs()
         identity = torch.eye(
             adjacency.shape[-1], device=adjacency.device, dtype=adjacency.dtype
         )
@@ -1230,14 +1165,23 @@ class CGMTrainingLoss(CompositeLoss):
                 f"CGM prior labels have no matching targets: {missing}."
             )
 
-        selected_target = target[source_labels]
-        annotation = selected_target.annotation
         source_params = {
             quantity: AnnotatedTensor(
-                tensor.tensor, annotation, axis=target.axis
+                tensor.tensor,
+                Annotations(
+                    labels=[
+                        label.removesuffix(suffix)
+                        for label in tensor.annotation.labels
+                    ],
+                    states=tensor.annotation.states,
+                    cardinalities=tensor.annotation.cardinalities,
+                    types=tensor.annotation.types,
+                ),
+                axis=target.axis,
             )
             for quantity, tensor in params.items()
         }
+        selected_target = target[source_labels]
         return (
             ModelOutput(params=source_params, extra=output.extra),
             selected_target,

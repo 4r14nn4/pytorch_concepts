@@ -93,7 +93,6 @@ class ConceptDataModule(LightningDataModule):
         Seed controlling the ``max_samples`` subsampling and the train/val/test
         **split**, passed to the splitter. If None, both are non-deterministic.
         Default is None.
-
     Attributes
     ----------
     dataset : ConceptDataset
@@ -160,7 +159,7 @@ class ConceptDataModule(LightningDataModule):
         splitter: Optional[object] = None,
         workers: int = 0,
         pin_memory: bool = False,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
     ):
         super(ConceptDataModule, self).__init__()
         # Subsample the dataset down to `max_samples` rows (all downstream
@@ -550,8 +549,8 @@ class ConceptDataModule(LightningDataModule):
 
         Notes
         -----
-        For training DataLoaders, ``drop_last=True`` is set to ensure
-        consistent batch sizes across iterations.
+        ``drop_last`` is intentionally left to the PyTorch DataLoader default,
+        so incomplete final batches are kept unless PyTorch changes its default.
         """
         if split is None:
             dataset = self.dataset
@@ -570,7 +569,6 @@ class ConceptDataModule(LightningDataModule):
         return DataLoader(dataset,
                           batch_size=batch_size or self.batch_size,
                           shuffle=shuffle,
-                          drop_last=split == 'train',
                           num_workers=self.workers,
                           pin_memory=pin_memory,
                           collate_fn=collate_fn)

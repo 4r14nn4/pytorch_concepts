@@ -76,10 +76,6 @@ class NeuralStructuralEquations(BaseConceptLayer):
             )
             for n_states in sorted(set(self.n_state_embeddings))
         })
-        self.shared_structural_equation = (
-            next(iter(self.shared_structural_equations.values()))
-            if len(self.shared_structural_equations) == 1 else None
-        )
 
         # The final part of the equation is specific to each concept.
         self.concept_structural_equations = nn.ModuleList([
@@ -170,7 +166,7 @@ class NeuralStructuralEquations(BaseConceptLayer):
         if single_target_context:
             contexts = contexts.unsqueeze(-2)
 
-        if self.shared_structural_equation is None:
+        if len(self.shared_structural_equations) != 1:
             return self._mixed_forward(
                 contexts, targets, target_concept, single_target_context,
             )
@@ -178,7 +174,7 @@ class NeuralStructuralEquations(BaseConceptLayer):
         # Original CGM flow after GraphAggregator has already applied
         # torch.matmul(x, fc1_weight) and restored the node axis.
         x = self.shared_activation(contexts)
-        x = self.shared_structural_equation(x)
+        x = next(iter(self.shared_structural_equations.values()))(x)
         x = self.shared_activation(x)
 
         outputs = [

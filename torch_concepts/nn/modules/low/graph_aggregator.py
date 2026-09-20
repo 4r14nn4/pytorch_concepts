@@ -41,6 +41,12 @@ class GraphAggregator(nn.Module):
         self, source_embeddings, *, adjacency=None,
         source_concepts=None, target_concept=None,
     ):
+        if adjacency is not None and self.training and self.generator is not None:
+            raise RuntimeError(
+                "GraphAggregator received an explicit adjacency during training. "
+                "Learned CGM training must call the graph generator so gradients "
+                "flow through the graph parameters."
+            )
         if adjacency is None:
             adjacency = (
                 self.graph()

@@ -56,7 +56,7 @@ BATCH_SIZE = 128
 LAMBDA_DAG = 3.0
 LAMBDA_CACE = 0.0
 GRAPH_THRESHOLD = 0.02
-OUTPUT_DIR = Path("outputs/19_cgm_paper")
+OUTPUT_DIR = Path("outputs/16_example_cgm")
 
 # adjacency[source, target] = 1 means source -> target
 ADJACENCY = torch.tensor(

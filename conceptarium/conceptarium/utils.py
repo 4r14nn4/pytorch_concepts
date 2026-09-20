@@ -18,7 +18,7 @@ from torch_concepts import seed_everything, Backbone, ConceptGraph
 from torch_concepts.nn import MLP
 from torch_concepts.utils import ensure_list
 from torch_concepts.data.base import ConceptDataModule
-from torch_concepts.construct_graph import GraphGeneratorLearnable
+from torch_concepts.graph_generator import GraphGeneratorLearnable
 
 logger = logging.getLogger(__name__)
 
@@ -232,3 +232,5 @@ def update_config_from_data(cfg: DictConfig, dm: ConceptDataModule) -> DictConfi
                 "n_concept_states": int(sum(dm.annotations.cardinalities)),
             }
     return cfg
+
+

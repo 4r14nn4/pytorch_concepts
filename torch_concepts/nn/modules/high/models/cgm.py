@@ -22,7 +22,7 @@ from .....utils import ensure_list
 from ...low.dense_layers import MLP
 from ...low.graph_aggregator import GraphAggregator
 from ...low.intervention.intervention import InterventionModule
-from ...low.base.intervention import BaseInterventionPolicy
+from ...low.base.intervention import InterventionPolicy
 from ...low.intervention.strategy.do import DoIntervention
 from ...low.sequential import Sequential
 from ...low.priors import LearnablePrior
@@ -48,7 +48,7 @@ from ..base.graph import DirectedGraphModel
 # Helper functions used only by CausalCGM
 # ---------------------------------------------------------------------------
 
-class _CGMInterventionPolicy(BaseInterventionPolicy):
+class _CGMInterventionPolicy(InterventionPolicy):
     """Helper policy that selects flattened concept columns per batch row."""
 
     def __init__(self, indices: torch.Tensor):
@@ -195,6 +195,10 @@ class CausalCGM(DirectedGraphModel):
         **kwargs,
     ) -> None:
         task_names = ensure_list(task_names) if task_names is not None else []
+        if not task_names:
+            raise ValueError("CausalCGM requires at least one task in `task_names`.")
+        if not set(task_names).issubset(annotations.labels):
+            raise ValueError("task_names must be present in annotations.")
         if graph is not None and graph_generator is not None:
             raise ValueError("Pass either `graph` or `graph_generator`, not both.")
         if graph is None and graph_generator is None:
@@ -227,8 +231,6 @@ class CausalCGM(DirectedGraphModel):
         )
         self.task_names = task_names
         self.copy_names = [f"{name}__copy" for name in self.concept_names]
-        if not set(self.task_names).issubset(self.concept_names):
-            raise ValueError("task_names must be present in annotations.")
         self.n_concepts = len(self.concept_names) - len(self.task_names)
         if self.n_concepts == 0:
             raise ValueError("CausalCGM requires at least one intervenable concept.")

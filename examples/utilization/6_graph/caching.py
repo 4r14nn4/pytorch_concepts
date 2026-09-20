@@ -1,7 +1,7 @@
 """
 Example: Explicit Graph Precomputation (data side)
 
-A causal graph can be computed before training ``CausalCGM``:
+A causal graph can be computed before training a graph-aware concept model:
 
 -- ``precompute_graph`` first shows that an unrefined GES graph can fail DAG
   validation, then uses an LLM to orient its ambiguous edges and caches the
@@ -16,7 +16,7 @@ Flow:
 2. Run GES without refinement and display the error if its CPDAG is not a DAG.
 3. Repeat GES with an LLM refinement that orients ambiguous edges.
 4. Reuse the refined graph from memory without rerunning GES or the LLM.
-5. Train ``CausalCGM`` using the fixed graph.
+5. Train ``CausallyReliableConceptBottleneckModel`` using the fixed graph.
 
 Unrefined graphs are cached on disk; callable refinements use the in-memory cache. Pass ``force=True`` to recompute it.
 
@@ -26,25 +26,37 @@ The refinement also requires ``litellm`` and an API key.
 The same graph API exists one level down on the dataset itself:
 ``dm.dataset.precompute_graph(generator, cache=True, force=False)``.
 """
-from functools import partial
-from torch_concepts.construct_graph import refine_llm
-from torch_concepts.data.concept_generator.llm_backends import LiteLLMBackend
-import os
+import matplotlib.style as mpl_style
+import torch
+
+if not hasattr(mpl_style, "core"):
+    mpl_style.core = mpl_style
+
+from torch_concepts.graph_generator import compose_refinements, dfs_remove_cycles, refine_llm
+from torch_concepts.llm_backends import LiteLLMBackend
+from torch_concepts.env import get_env
 import time
 from pathlib import Path
 
-import torch
 from pytorch_lightning import Trainer
+from torchmetrics.classification import BinaryAccuracy
 
 from torch_concepts import seed_everything
-from torch_concepts.construct_graph import GraphGeneratorFixed
 from torch_concepts.data import BnLearnDataModule
-from torch_concepts.nn import CGMTrainingLoss, CausalCGM, MLP
-from torch_concepts.construct_graph import GraphGeneratorFixed
+from torch_concepts.graph_generator import GraphGeneratorFixed
+from torch_concepts.nn import (
+    CausallyReliableConceptBottleneckModel,
+    ConceptLoss,
+    ConceptMetrics,
+    MLP,
+)
+from torch_concepts.nn.modules.mid.inference.torch.deterministic import (
+    DeterministicInference,
+)
 
 
-LLM_MODEL = "groq/openai/gpt-oss-20b"
-LLM_API_KEY = ""
+LLM_MODEL = get_env("GRAPH_LLM_MODEL", "groq/openai/gpt-oss-20b")
+LLM_API_KEY = get_env("GROQ_API_KEY")
 DOMAIN = "medical diagnosis"
 OUTPUT_DIR = Path("output")
 
@@ -92,11 +104,25 @@ def main():
 
     if not LLM_API_KEY:
         raise RuntimeError(
-            "Set LLM_API_KEY in this file to run the GES + LLM refinement."
+            "Set GROQ_API_KEY in .env to run the GES + LLM refinement."
         )
 
-    backend = LiteLLMBackend(model=LLM_MODEL, api_key=LLM_API_KEY, temperature=0, max_tokens=200)
-    refinement = partial(refine_llm, llm_backend=backend, domain=DOMAIN, concept_descriptions={**DATASET_LABEL_DESCRIPTIONS, **NEW_LABEL_DESCRIPTIONS})
+    backend = LiteLLMBackend(
+        model=LLM_MODEL,
+        api_key=LLM_API_KEY,
+    )
+    refinement = compose_refinements(
+        refine_llm(
+            llm_backend=backend,
+            domain=DOMAIN,
+            concept_descriptions={
+                **DATASET_LABEL_DESCRIPTIONS,
+                **NEW_LABEL_DESCRIPTIONS,
+            },
+            repeats=1,
+        ),
+        dfs_remove_cycles,
+    )
 
     # if new descriptions are provided, they override the dataset descriptions for the
     # concepts for which they are specified.
@@ -119,25 +145,35 @@ def main():
     refined_plot = dm.graph.plot(OUTPUT_DIR / "ges_refined", title="GES + LLM refinement")
     print(f"Refined graph plot: {refined_plot}")
 
-    # 5. CGM consumes the generated vectors and the already materialized graph.
-    model = CausalCGM(
+    # 5. The causally reliable CBM consumes the already materialized graph.
+    model = CausallyReliableConceptBottleneckModel(
         input_size=dm.n_features[-1],
         annotations=dm.annotations,
-        task_names="dysp",
         graph=dm.graph,
         backbone=MLP(dm.n_features[-1], 128),
         latent_size=128,
         embedding_size=8,
+        hypernet_hidden_size=8,
         lightning=True,
-        loss=CGMTrainingLoss(),
+        train_inference=DeterministicInference,
+        loss=ConceptLoss(binary=torch.nn.BCEWithLogitsLoss()),
+        metrics=ConceptMetrics(
+            annotations=dm.annotations,
+            summary=True,
+            per_concept=True,
+            binary={"accuracy": BinaryAccuracy()},
+        ),
         optim_class=torch.optim.AdamW,
         optim_kwargs={"lr": 0.01},
     )
-    assert model.graph_generator is None
 
-    trainer = Trainer(max_epochs=20, logger=False)
+    trainer = Trainer(
+        max_epochs=20,
+        logger=False,
+        enable_checkpointing=False,
+    )
     trainer.fit(model, datamodule=dm)
-    trainer.test(ckpt_path="best", datamodule=dm)
+    trainer.test(model, datamodule=dm)
 
 
 if __name__ == "__main__":
