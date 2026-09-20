@@ -35,6 +35,7 @@ Encoders
    :nosignatures:
 
    LinearEmbeddingToConcept
+   MLPEmbeddingToConcept
    LinearEmbeddingEncoder
    MLPEmbeddingEncoder
    SelectorEmbeddingEncoder
@@ -50,6 +51,7 @@ Predictors
    :nosignatures:
 
    LinearConceptToConcept
+   MLPConceptToConcept
    CallableConceptToConcept
    HyperlinearConceptEmbeddingToConcept
    MixConceptEmbeddingToConcept
@@ -105,6 +107,7 @@ Interventions
    :nosignatures:
 
    intervention
+   InterventionModule
    GroundTruthIntervention
    DoIntervention
    DistributionIntervention
@@ -132,7 +135,7 @@ Base Classes
 
    BaseConceptLayer
    BaseGraphLearner
-   BaseConceptInterventionStrategy
-   BaseModuleInterventionStrategy
-   BaseInterventionPolicy
-   BaseInterventionModule
+   InterventionStrategy
+   ConceptInterventionStrategy
+   ModuleInterventionStrategy
+   InterventionPolicy

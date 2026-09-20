@@ -1,7 +1,8 @@
 """
-Linear encoder modules for concept prediction from embeddings.
+MLP encoder modules for concept prediction from embeddings.
 
-These modules provide encoder layers that transform embeddings into concept representations.
+These modules provide encoder layers that transform embeddings into concept
+representations.
 """
 from typing import Union
 
@@ -9,48 +10,53 @@ import torch
 
 from torch_concepts import Annotations
 from ..base.layer import BaseConceptLayer
+from ..dense_layers import MLP
 
 
-class LinearEmbeddingToConcept(BaseConceptLayer):
+class MLPEmbeddingToConcept(BaseConceptLayer):
     """
     Encoder that predicts concept representations from embeddings.
 
-    This encoder transforms an embedding into concept representations using 
-    a linear layer.
+    The nonlinear counterpart of :class:`LinearEmbeddingToConcept`: the same
+    ``embeddings -> concepts`` interface, with an :class:`MLP` in place of the
+    single linear layer, for a latent that does not explain its concepts
+    linearly.
 
     Attributes:
         in_embeddings (int): Number of input embedding features.
         out_concepts (int): Number of output concept representations.
+        encoder (MLP): The encoding network.
 
     Args:
         in_embeddings: Number of input embedding features.
         out_concepts: Number of output concept representations.
-        *args: Additional arguments for torch.nn.Linear.
-        **kwargs: Additional keyword arguments for torch.nn.Linear.
+        hidden_size: Units in each hidden layer.
+        n_layers: Number of hidden layers. Defaults to ``1``.
+        activation: Activation function. Defaults to ``'relu'``.
+        dropout: Dropout probability. Defaults to ``0.``.
 
     Example:
         >>> import torch
-        >>> from torch_concepts.nn import LinearEmbeddingToConcept
+        >>> from torch_concepts.nn import MLPEmbeddingToConcept
         >>>
-        >>> encoder = LinearEmbeddingToConcept(
+        >>> encoder = MLPEmbeddingToConcept(
         ...     in_embeddings=128,
-        ...     out_concepts=10
+        ...     out_concepts=10,
+        ...     hidden_size=64,
         ... )
         >>> embeddings = torch.randn(4, 128)  # batch_size=4, embedding_dim=128
         >>> concepts = encoder(embeddings)
         >>> print(concepts.shape)
         torch.Size([4, 10])
-
-    References:
-        Koh et al. "Concept Bottleneck Models", ICML 2020.
-        https://arxiv.org/pdf/2007.04612
     """
     def __init__(
         self,
         in_embeddings: int,
         out_concepts: Union[int, Annotations],
-        *args,
-        **kwargs,
+        hidden_size: int,
+        n_layers: int = 1,
+        activation: str = 'relu',
+        dropout: float = 0.,
     ):
         """
         Initialize the encoder.
@@ -58,19 +64,23 @@ class LinearEmbeddingToConcept(BaseConceptLayer):
         Args:
             in_embeddings: Number of input embedding features.
             out_concepts: Number of output concept representations.
-            *args: Additional arguments for torch.nn.Linear.
-            **kwargs: Additional keyword arguments for torch.nn.Linear.
+            hidden_size: Units in each hidden layer.
+            n_layers: Number of hidden layers.
+            activation: Activation function.
+            dropout: Dropout probability.
         """
         super().__init__(
             in_embeddings=in_embeddings,
             out_concepts=out_concepts,
         )
         # (..., in_embeddings) -> (..., out_concepts)
-        self.encoder = torch.nn.Linear(
+        self.encoder = MLP(
             self.in_embeddings_shape,
+            hidden_size,
             self.out_concepts_shape,
-            *args,
-            **kwargs,
+            n_layers,
+            activation,
+            dropout,
         )
 
     def forward(
