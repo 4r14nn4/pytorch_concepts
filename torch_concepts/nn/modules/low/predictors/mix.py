@@ -10,11 +10,23 @@ from typing import List, Union
 
 
 class MixConceptEmbeddingToConceptEmbedding(torch.nn.Module):
-    """Mix concept values with their state embeddings.
+    """Mix concept values with their state embeddings, concept by concept.
 
-    When ``complete_output`` is enabled, the result always contains one
-    embedding for every concept. Missing concepts are represented by zero
-    embeddings.
+    ``concept_embeddings`` is a sequence of state-embedding banks and
+    ``concept_values`` is the matching sequence of observed/predicted concept
+    values. ``source_concepts`` maps each bank back to the original concept
+    index, so callers may pass only a subset of concepts.
+
+    With ``complete_output=False`` the output follows the supplied source order
+    and has trailing shape ``(len(source_concepts), in_embeddings)``. With
+    ``complete_output=True`` the output is scattered back to the full concept
+    axis, with trailing shape ``(n_concepts, in_embeddings)`` and zeros for
+    concepts that were not supplied. CGM uses the complete form before graph
+    aggregation so the adjacency always indexes the original concept order.
+
+    This module has trainable parameters only when binary embeddings are
+    expanded. It does not cache outputs; if multiple CPDs call it with the same
+    inputs, the same mixture is recomputed.
     """
 
     def __init__(
@@ -58,6 +70,7 @@ class MixConceptEmbeddingToConceptEmbedding(torch.nn.Module):
         concept_values,
         source_concepts=None,
     ):
+        """Return mixed embeddings for the supplied source concepts."""
         if not concept_embeddings:
             raise ValueError("At least one concept embedding is required.")
 

@@ -5,7 +5,19 @@ import torch.nn as nn
 
 
 class GraphAggregator(nn.Module):
-    """Learn or store a graph and aggregate source embeddings through it."""
+    """Aggregate source embeddings through a fixed or learned adjacency.
+
+    Exactly one of ``generator`` and ``adjacency`` must be provided. With a
+    generator, the first forward after :meth:`clear` calls ``generator()`` and
+    stores the resulting adjacency in ``_last_adjacency``. Later forwards reuse
+    that same adjacency until :meth:`clear` is called again. In CGM training
+    this makes all endogenous CPDs evaluated in the same query use one graph,
+    while still exposing the adjacency to graph regularization losses.
+
+    Passing ``adjacency=...`` to :meth:`forward` is meant for fixed/evaluation
+    contexts. During training with a learnable generator it is rejected because
+    bypassing the generator would detach the graph parameters from the loss.
+    """
 
     def __init__(self, generator=None, adjacency=None):
         super().__init__()
@@ -18,7 +30,7 @@ class GraphAggregator(nn.Module):
         )
 
     def graph(self):
-        """Return the learned or fixed adjacency."""
+        """Return and cache the learned or fixed adjacency for this query."""
         adjacency = (
             self.generator()
             if self.generator is not None
@@ -28,7 +40,7 @@ class GraphAggregator(nn.Module):
         return adjacency
 
     def clear(self):
-        """Make the next forward generate a fresh graph."""
+        """Forget the cached adjacency so the next forward materializes it."""
         self._last_adjacency = None
 
     @property
@@ -41,6 +53,15 @@ class GraphAggregator(nn.Module):
         self, source_embeddings, *, adjacency=None,
         source_concepts=None, target_concept=None,
     ):
+        """Aggregate ``source_embeddings`` over source-to-target edges.
+
+        ``source_embeddings`` has trailing shape ``(source, embedding)`` and
+        the adjacency has trailing shape ``(source, target)``. When
+        ``source_concepts`` is provided, only those adjacency rows are used.
+        When ``target_concept`` is provided, only that target column is
+        returned; otherwise the full ``(..., target, embedding)`` tensor is
+        returned.
+        """
         if adjacency is not None and self.training and self.generator is not None:
             raise RuntimeError(
                 "GraphAggregator received an explicit adjacency during training. "

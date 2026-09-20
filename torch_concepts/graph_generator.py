@@ -15,7 +15,9 @@ Concept graph generation utilities.
 
 Both concrete APIs return a :class:`ConceptGraph`, which owns graph inspection
 and plotting. Optional refinement accepts any ``ConceptGraph -> ConceptGraph``
-callable, including :func:`refine_llm`.
+callable. Refinement always runs before DAG validation. Therefore a DAG
+validation error from :meth:`construct_graph` means the final graph, after all
+refinements, is still cyclic.
 
 Caching
 -------
@@ -250,6 +252,11 @@ def refine_llm(
     Reciprocal edges represent ambiguity, for example both ``A -> B`` and
     ``B -> A`` are present. Directed and absent pairs are left unchanged by the
     returned graph-to-graph callable.
+
+    This refinement does not guarantee acyclicity by itself. If the downstream
+    generator has ``require_dag=True`` and the source may produce cycles,
+    compose it with a cycle-removal refinement such as
+    :func:`remove_weakest_cycles` or :func:`dfs_remove_cycles`.
     """
     if not callable(llm_backend):
         raise TypeError("`llm_backend` must be callable.")
@@ -338,7 +345,13 @@ def dfs_remove_cycles(
     graph: ConceptGraph,
     start_node: int | str | None = None,
 ) -> ConceptGraph:
-    """Remove cycles by deleting the last edge visited before each cycle."""
+    """Remove cycles by deleting the DFS back-edge that closes each cycle.
+
+    This mirrors the lightweight DFS post-processing used by the older graph
+    examples. It is deterministic for a fixed adjacency and start node, but it
+    is a heuristic; :func:`remove_weakest_cycles` is the closer match to the
+    CausalCGM projection rule for weighted learned graphs.
+    """
     node_names = list(graph.node_names)
     adjacency = graph.data.detach().clone()
     if start_node is None:
@@ -431,7 +444,12 @@ def entropy_initialization(data: Any) -> Callable[[Any], None]:
 
 
 def fixed_dagma_initialization(adjacency: Any) -> Callable[[Any], None]:
-    """Return a DAGMA-CGM initializer with a frozen adjacency matrix."""
+    """Return an initializer that seeds DAGMA-CGM from a fixed adjacency.
+
+    Use this with :class:`GraphGeneratorLearnable` when the learnable DAGMA-CGM
+    parameters should start from an externally computed graph. It is not a
+    fixed graph generator: training may still change the graph afterwards.
+    """
     adjacency = torch.as_tensor(adjacency, dtype=torch.float32).clone()
 
     @torch.no_grad()
@@ -742,13 +760,12 @@ class GraphGenerator:
         if self.require_dag and not graph.is_directed_acyclic():
             raise ValueError(
                 f"Graph method {self.name!r} produced a graph that is not a "
-                "directed acyclic graph (DAG). DAG validation is enabled by "
-                "default. Choose another method, for example "
-                "`GraphGeneratorFixed(name='ges')`, or orient ambiguous edges "
-                "with an LLM refinement, for example "
-                "`GraphGeneratorFixed(name='pc', "
-                "refinement=refine_llm(llm_backend=backend))`. Pass "
-                "`require_dag=False` only when a non-DAG is intentional."
+                "directed acyclic graph (DAG) after refinement. DAG validation "
+                "is enabled by default. Add or adjust a cycle-removal "
+                "refinement, for example "
+                "`refinement=compose_refinements(refine_llm(...), "
+                "dfs_remove_cycles)`, or pass `require_dag=False` only when a "
+                "non-DAG is intentional."
             )
 
     def construct_graph(

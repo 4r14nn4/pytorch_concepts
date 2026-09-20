@@ -9,7 +9,21 @@ from ...utils import state_embedding_counts
 
 
 class NeuralStructuralEquations(BaseConceptLayer):
-    """Map graph-aggregated target contexts to distribution parameters."""
+    """Map graph-aggregated target contexts to distribution parameters.
+
+    Each concept has its own final structural equation head in
+    ``concept_structural_equations``. The preceding shared block is grouped by
+    the number of state embeddings required by the target concept: binary and
+    continuous concepts usually share the one-state block, while categorical
+    concepts with the same cardinality share a wider block. Concepts with
+    different state counts do not share that block.
+
+    In CGM this module sits after the mixer and graph aggregator. For non-root
+    evaluation factors it receives the graph-aggregated context and then
+    selects the target concept's column before the concept-specific head. Root
+    evaluation factors bypass this module and reuse the corresponding copy CPD
+    parametrization.
+    """
 
     def __init__(
         self,
@@ -142,6 +156,12 @@ class NeuralStructuralEquations(BaseConceptLayer):
 
         During evaluation a caller may already pass one target context with
         shape ``(..., embedding_dim)`` together with ``target_concept=j``.
+
+        When all concepts have the same number of state embeddings, the shared
+        block is applied once to the full context tensor and target columns are
+        selected afterwards. With mixed variable types/cardinalities, the shared
+        block is chosen by each target's state count and evaluated for that
+        target group; no result cache is kept inside this module.
         """
         if target_concept is not None and target_concepts is not None:
             raise ValueError(
@@ -194,7 +214,7 @@ class NeuralStructuralEquations(BaseConceptLayer):
     def _mixed_forward(
         self, contexts, targets, target_concept, single_target_context,
     ):
-        """Fallback for non-original CGMs with mixed concept cardinalities."""
+        """Evaluate targets whose state counts may require different blocks."""
         x = self.shared_activation(contexts)
         outputs = [
             self.concept_structural_equations[target](
@@ -220,6 +240,8 @@ class NeuralStructuralEquations(BaseConceptLayer):
 
 
 class _SelectedStructuralEquations(nn.Module):
+    """Lightweight view that restricts an equation module to selected targets."""
+
     def __init__(self, equations, targets):
         super().__init__()
         self.equations = equations
