@@ -549,8 +549,8 @@ class ConceptDataModule(LightningDataModule):
 
         Notes
         -----
-        ``drop_last`` is intentionally left to the PyTorch DataLoader default,
-        so incomplete final batches are kept unless PyTorch changes its default.
+        For training DataLoaders, ``drop_last=True`` is set to ensure
+        consistent batch sizes across iterations.
         """
         if split is None:
             dataset = self.dataset
@@ -569,6 +569,7 @@ class ConceptDataModule(LightningDataModule):
         return DataLoader(dataset,
                           batch_size=batch_size or self.batch_size,
                           shuffle=shuffle,
+                          drop_last=split == 'train',
                           num_workers=self.workers,
                           pin_memory=pin_memory,
                           collate_fn=collate_fn)
