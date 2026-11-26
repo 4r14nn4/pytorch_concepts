@@ -45,6 +45,10 @@ from .modules.low.predictors.rule import (
     RuleMemory,
 )
 from .modules.low.predictors.selective import SelectiveLinearConceptToConcept
+from .modules.low.predictors.mixture import (
+    MixtureOfExpertsConceptToConcept,
+    SymbolicConceptToConcept,
+)
 from .modules.low.predictors.mix import MixConceptEmbeddingToConcept, \
     MixConceptEmbeddings
 
@@ -78,6 +82,7 @@ from .modules.high.models.cvae import ConditionalVAE
 from .modules.high.models.graph_cbm import GraphConceptBottleneckModel
 from .modules.high.models.c2bm import CausallyReliableConceptBottleneckModel
 from .modules.high.models.cmr import CMRTaskLoss, ConceptMemoryReasoner
+from .modules.high.models.sym_m_cbe import SymbolicMixtureOfConceptBottleneckExperts
 
 # Models (mid-level)
 from .modules.mid.factors.factor import ParametricFactor
@@ -86,7 +91,6 @@ from .modules.mid.factors.potential import ParametricPotential
 from .modules.mid.graph.probabilistic_model import ProbabilisticModel
 from .modules.mid.graph.bayesian_network import BayesianNetwork
 from .modules.mid.graph.markov_network import MarkovNetwork
-from .modules.mid.graph.dynamic_bayesian_network import DynamicBayesianNetwork
 from .modules.mid.graph.plot import plot_pgm
 from .modules.mid.variable import Variable, ConceptVariable, EmbeddingVariable
 
@@ -111,8 +115,6 @@ from .modules.mid.inference.torch.belief_propagation import BeliefPropagation
 from .modules.mid.inference.pgmpy.variable_elimination import PgmpyVariableElimination
 # pyro
 from .modules.mid.inference.pyro.variational import VariationalInference
-# any engine on a dynamic Bayesian network
-from .modules.mid.inference.unrolled import UnrolledInference
 
 # Intervention module and context manager
 from .modules.low.base.intervention import InterventionModule, intervention
@@ -173,6 +175,8 @@ __all__ = [
     "MixConceptEmbeddings",
     "RuleMemory",
     "RuleConceptEmbeddingToConcept",
+    "MixtureOfExpertsConceptToConcept",
+    "SymbolicConceptToConcept",
 
     # Dense layers
     "Dense",
@@ -218,6 +222,7 @@ __all__ = [
     "ConceptBottleneckVAE",
     "ConditionalVAE",
     "ConceptMemoryReasoner",
+    "SymbolicMixtureOfConceptBottleneckExperts",
     "GraphConceptBottleneckModel",
     "CausallyReliableConceptBottleneckModel",
     # Models (mid-level)
@@ -227,7 +232,6 @@ __all__ = [
     "ProbabilisticModel",
     "BayesianNetwork",
     "MarkovNetwork",
-    "DynamicBayesianNetwork",
     "plot_pgm",
     "Variable",
     "ConceptVariable",
@@ -250,7 +254,6 @@ __all__ = [
     "PyroBaseInference",
     "PgmpyBaseInference",
     "VariationalInference",
-    "UnrolledInference",
 
     # Interventions
     "InterventionModule",
